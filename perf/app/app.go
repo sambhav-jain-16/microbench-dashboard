@@ -16,21 +16,8 @@ type App struct {
 	// If empty, the current directory will be used.
 	BaseDir string
 
-	// InfluxHost is the host URL of the perf InfluxDB server.
-	InfluxHost string
-
-	// InfluxToken is the Influx auth token for connecting to InfluxHost.
-	//
-	// If empty, we attempt to fetch the token from Secret Manager using
-	// InfluxProject.
-	InfluxToken string
-
-	// InfluxProject is the GCP project ID containing the InfluxDB secrets.
-	//
-	// If empty, this defaults to the project this service is running as.
-	//
-	// Only used if InfluxToken is empty.
-	InfluxProject string
+	// VictoriaMetricsURL is the URL of the VictoriaMetrics server.
+	VictoriaMetricsURL string
 
 	// AuthCronEmail is the service account email which requests to
 	// /cron/syncinflux must contain an OICD authentication token for, with

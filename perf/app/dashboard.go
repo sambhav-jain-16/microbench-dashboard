@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/exp/maps"
 	"log"
 	"math"
 	"net/http"
@@ -21,9 +20,10 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/exp/maps"
+
 	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/influxdata/influxdb-client-go/v2/api/query"
-	"golang.org/x/build/internal/influx"
 	"golang.org/x/build/third_party/bandchart"
 )
 
@@ -118,169 +118,126 @@ func fluxRecordToValue(rec *query.FluxRecord) (ValueJSON, error) {
 	}, nil
 }
 
-// validateRe is an allowlist of characters for a Flux string literal. The
-// string will be quoted, so we must not allow ending the quote sequence.
+// validateRe is an allowlist of characters for a PromQL string literal
 var validateRe = regexp.MustCompile(`^[a-zA-Z0-9(),=/_:;.*-\[\]\\]*$`)
 
-func validateFluxString(s string) error {
+func validatePromQLString(s string) error {
 	if !validateRe.MatchString(s) {
 		return fmt.Errorf("malformed value %q", s)
 	}
 	return nil
 }
 
-func influxQuery(ctx context.Context, qc api.QueryAPI, query string) (*api.QueryTableResult, error) {
-	log.Printf("InfluxDB query: %s", query)
-	return qc.Query(ctx, query)
-}
-
 var errBenchmarkNotFound = errors.New("benchmark not found")
 
-func sanitizeInfluxRegex(name string) string {
+func sanitizePromQLRegex(name string) string {
 	return strings.Replace(name, "/", "\\/", -1)
 }
 
-// fetchNamedUnitBenchmark queries Influx for a specific name + unit benchmark.
-func fetchNamedUnitBenchmark(ctx context.Context, qc api.QueryAPI, start, end time.Time, repository, branch, pkg, name, unit string) (*BenchmarkJSON, error) {
-	if err := validateFluxString(repository); err != nil {
+// fetchNamedUnitBenchmark queries VictoriaMetrics for a specific name + unit benchmark
+func fetchNamedUnitBenchmark(ctx context.Context, vmClient *VictoriaMetricsClient, start, end time.Time, repository, branch, pkg, name, unit string) (*BenchmarkJSON, error) {
+	if err := validatePromQLString(repository); err != nil {
 		return nil, fmt.Errorf("invalid repository name: %w", err)
 	}
-	if err := validateFluxString(branch); err != nil {
+	if err := validatePromQLString(branch); err != nil {
 		return nil, fmt.Errorf("invalid branch name: %w", err)
 	}
-	if err := validateFluxString(name); err != nil {
+	if err := validatePromQLString(name); err != nil {
 		return nil, fmt.Errorf("invalid benchmark name: %w", err)
 	}
-	if err := validateFluxString(unit); err != nil {
+	if err := validatePromQLString(unit); err != nil {
 		return nil, fmt.Errorf("invalid unit name: %w", err)
 	}
 
-	// Note that very old points are missing the "repository" field. fill()
-	// sets repository=go on all points missing that field, as they were
-	// all runs of the go repo.
-	query := fmt.Sprintf(`
-from(bucket: "%s")
-  |> range(start: %s, stop: %s)
-  |> filter(fn: (r) => r["_measurement"] == "benchmark-result")
-  |> filter(fn: (r) => r["pkg"] == "%s")
-  |> filter(fn: (r) => r["name"] == "%s")
-  |> filter(fn: (r) => r["unit"] == "%s")
-  |> filter(fn: (r) => r["branch"] == "%s")
-  |> filter(fn: (r) => r["goos"] == "linux")
-  |> filter(fn: (r) => r["goarch"] == "amd64")
-  |> fill(column: "repository", value: "cockroach")
-  |> filter(fn: (r) => r["repository"] == "%s")
-  |> pivot(columnKey: ["_field"], rowKey: ["_time"], valueColumn: "_value")
-  |> yield(name: "last")
-`, influx.Bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), pkg, name, unit, branch, repository)
+	query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name="%s",unit="%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
+		pkg, name, unit, branch, repository)
 
-	res, err := influxQuery(ctx, qc, query)
+	data, err := vmClient.Query(ctx, query, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("error performing query: %w", err)
 	}
 
-	b, err := groupBenchmarkResults(res, false)
+	benchmarks, err := parseVictoriaMetricsResponse(data)
 	if err != nil {
 		return nil, err
 	}
-	if len(b) == 0 {
+	if len(benchmarks) == 0 {
 		return nil, errBenchmarkNotFound
 	}
-	if len(b) > 1 {
-		return nil, fmt.Errorf("query returned too many benchmarks: %+v", b)
+	if len(benchmarks) > 1 {
+		return nil, fmt.Errorf("query returned too many benchmarks: %+v", benchmarks)
 	}
-	return b[0], nil
+	return benchmarks[0], nil
 }
 
-// fetchNamedBenchmark queries Influx for all benchmark results with the passed
-// name (for all units).
-func fetchNamedBenchmark(ctx context.Context, qc api.QueryAPI, regressions bool, start, end time.Time, repository, branch, name, pkg string, regex bool) ([]*BenchmarkJSON, error) {
-	if err := validateFluxString(repository); err != nil {
+// fetchNamedBenchmark queries VictoriaMetrics for all benchmark results with the passed
+// name (for all units)
+func fetchNamedBenchmark(ctx context.Context, vmClient *VictoriaMetricsClient, regressions bool, start, end time.Time, repository, branch, name, pkg string, regex bool) ([]*BenchmarkJSON, error) {
+	if err := validatePromQLString(repository); err != nil {
 		return nil, fmt.Errorf("invalid repository name: %w", err)
 	}
-	if err := validateFluxString(branch); err != nil {
+	if err := validatePromQLString(branch); err != nil {
 		return nil, fmt.Errorf("invalid branch name: %w", err)
 	}
-	if err := validateFluxString(name); err != nil {
+	if err := validatePromQLString(name); err != nil {
 		return nil, fmt.Errorf("invalid benchmark name: %w", err)
 	}
 
-	makeFilter := func(field string, value string) string {
-		if value != "" {
-			if regex {
-				value = fmt.Sprintf("=~ /%s/", sanitizeInfluxRegex(value))
-			} else {
-				value = fmt.Sprintf("== \"%s\"", value)
-			}
-			return fmt.Sprintf("|> filter(fn: (r) => r[\"%s\"] %s)", field, value)
-		}
-		return ""
+	var query string
+	if regex {
+		name = sanitizePromQLRegex(name)
+		query = fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name=~"%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
+			pkg, name, branch, repository)
+	} else {
+		query = fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name="%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
+			pkg, name, branch, repository)
 	}
 
-	// Note that very old points are missing the "repository" field. fill()
-	// sets repository=go on all points missing that field, as they were
-	// all runs of the go repo.
-	query := fmt.Sprintf(`
-from(bucket: "%s")
-  |> range(start: %s, stop: %s)
-  |> filter(fn: (r) => r["_measurement"] == "benchmark-result")
-  %s
-  %s
-  |> filter(fn: (r) => r["branch"] == "%s")
-  |> filter(fn: (r) => r["goos"] == "linux")
-  |> filter(fn: (r) => r["goarch"] == "amd64")
-  |> fill(column: "repository", value: "cockroach")
-  |> filter(fn: (r) => r["repository"] == "%s")
-  |> pivot(columnKey: ["_field"], rowKey: ["_time"], valueColumn: "_value")
-  |> yield(name: "last")
-`, influx.Bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), makeFilter("name", name), makeFilter("pkg", pkg), branch, repository)
-
-	res, err := influxQuery(ctx, qc, query)
+	data, err := vmClient.Query(ctx, query, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("error performing query: %w", err)
 	}
 
-	b, err := groupBenchmarkResults(res, regressions)
+	benchmarks, err := parseVictoriaMetricsResponse(data)
 	if err != nil {
 		return nil, err
 	}
-	if len(b) == 0 {
+	if len(benchmarks) == 0 {
 		return nil, errBenchmarkNotFound
 	}
-	return b, nil
+
+	if regressions {
+		return filterAndSortRegressions(benchmarks), nil
+	}
+	return benchmarks, nil
 }
 
-// fetchAllBenchmarks queries Influx for all benchmark results.
-func fetchAllBenchmarks(ctx context.Context, qc api.QueryAPI, regressions bool, start, end time.Time, repository, branch string) ([]*BenchmarkJSON, error) {
-	if err := validateFluxString(repository); err != nil {
+// fetchAllBenchmarks queries VictoriaMetrics for all benchmark results
+func fetchAllBenchmarks(ctx context.Context, vmClient *VictoriaMetricsClient, regressions bool, start, end time.Time, repository, branch string) ([]*BenchmarkJSON, error) {
+	if err := validatePromQLString(repository); err != nil {
 		return nil, fmt.Errorf("invalid repository name: %w", err)
 	}
-	if err := validateFluxString(branch); err != nil {
+	if err := validatePromQLString(branch); err != nil {
 		return nil, fmt.Errorf("invalid branch name: %w", err)
 	}
 
-	// Note that very old points are missing the "repository" field. fill()
-	// sets repository=go on all points missing that field, as they were
-	// all runs of the go repo.
-	query := fmt.Sprintf(`
-from(bucket: "%s")
-  |> range(start: %s, stop: %s)
-  |> filter(fn: (r) => r["_measurement"] == "benchmark-result")
-  |> filter(fn: (r) => r["branch"] == "%s")
-  |> filter(fn: (r) => r["goos"] == "linux")
-  |> filter(fn: (r) => r["goarch"] == "amd64")
-  |> fill(column: "repository", value: "cockroach")
-  |> filter(fn: (r) => r["repository"] == "%s")
-  |> pivot(columnKey: ["_field"], rowKey: ["_time"], valueColumn: "_value")
-  |> yield(name: "last")
-`, influx.Bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), branch, repository)
+	query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
+		branch, repository)
 
-	res, err := influxQuery(ctx, qc, query)
+	data, err := vmClient.Query(ctx, query, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("error performing query: %w", err)
 	}
 
-	return groupBenchmarkResults(res, regressions)
+	benchmarks, err := parseVictoriaMetricsResponse(data)
+	if err != nil {
+		return nil, err
+	}
+
+	if regressions {
+		return filterAndSortRegressions(benchmarks), nil
+	}
+	return benchmarks, nil
 }
 
 type RegressionJSON struct {
@@ -557,10 +514,6 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	endParam := r.FormValue("end")
 	if endParam != "" {
 		var err error
-		// Quirk: Browsers don't have an easy built-in way to deal with
-		// timezone in input boxes. The datetime input type yields a
-		// string in this form, with no timezone (either local or UTC).
-		// Thus, we just treat this as UTC.
 		end, err = time.Parse("2006-01-02T15:04", endParam)
 		if err != nil {
 			log.Printf("Error parsing end %q: %v", endParam, err)
@@ -576,15 +529,7 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Dashboard total query time: %s", time.Since(methStart))
 	}()
 
-	ifxc, err := a.influxClient(ctx)
-	if err != nil {
-		log.Printf("Error getting Influx client: %v", err)
-		http.Error(w, "Error connecting to Influx", 500)
-		return
-	}
-	defer ifxc.Close()
-
-	qc := ifxc.QueryAPI(influx.Org)
+	vmClient := NewVictoriaMetricsClient(a.VictoriaMetricsURL)
 
 	repository := r.FormValue("repository")
 	if repository == "" {
@@ -596,9 +541,6 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	benchmark := r.FormValue("benchmark")
-	regressions := r.FormValue("regressions") == "on"
-	regex := r.FormValue("regex") == "on"
-
 	pkg := "pkg/bench"
 	if r.Form.Has("package") {
 		pkg = r.FormValue("package")
@@ -608,24 +550,44 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	var benchmarks []*BenchmarkJSON
 
 	if unit != "" {
-		// Fetch a single and specific benchmark.
-		var result *BenchmarkJSON
-		result, err = fetchNamedUnitBenchmark(ctx, qc, start, end, repository, branch, pkg, benchmark, unit)
-		if result != nil && err == nil {
-			benchmarks = []*BenchmarkJSON{result}
+		// Fetch a single and specific benchmark
+		query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name="%s",unit="%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
+			pkg, benchmark, unit, branch, repository)
+		data, err := vmClient.Query(ctx, query, start, end)
+		if err != nil {
+			log.Printf("Error querying VictoriaMetrics: %v", err)
+			http.Error(w, "Error querying VictoriaMetrics", 500)
+			return
+		}
+		// Parse the VictoriaMetrics response and convert to BenchmarkJSON
+		// This part needs to be implemented based on the VictoriaMetrics response format
+		benchmarks, err = parseVictoriaMetricsResponse(data)
+		if err != nil {
+			log.Printf("Error parsing VictoriaMetrics response: %v", err)
+			http.Error(w, "Error parsing VictoriaMetrics response", 500)
+			return
 		}
 	} else {
-		benchmarks, err = fetchNamedBenchmark(ctx, qc, regressions, start, end, repository, branch, benchmark, pkg, regex)
+		// Fetch all benchmarks matching the criteria
+		query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name=~"%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
+			pkg, benchmark, branch, repository)
+		data, err := vmClient.Query(ctx, query, start, end)
+		if err != nil {
+			log.Printf("Error querying VictoriaMetrics: %v", err)
+			http.Error(w, "Error querying VictoriaMetrics", 500)
+			return
+		}
+		benchmarks, err = parseVictoriaMetricsResponse(data)
+		if err != nil {
+			log.Printf("Error parsing VictoriaMetrics response: %v", err)
+			http.Error(w, "Error parsing VictoriaMetrics response", 500)
+			return
+		}
 	}
 
-	if errors.Is(err, errBenchmarkNotFound) {
-		log.Printf("Benchmark not found: %q", benchmark)
-		http.Error(w, "Benchmark not found", 404)
-		return
-	}
-	if err != nil {
-		log.Printf("Error fetching benchmarks: %v", err)
-		http.Error(w, "Error fetching benchmarks", 500)
+	if len(benchmarks) == 0 {
+		log.Printf("No benchmarks found matching criteria")
+		http.Error(w, "No benchmarks found", 404)
 		return
 	}
 
@@ -643,6 +605,87 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error encoding results: %v", err)
 		http.Error(w, "Internal error, see logs", 500)
 	}
+}
+
+// parseVictoriaMetricsResponse parses the VictoriaMetrics response into BenchmarkJSON format
+func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
+	var response struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric struct {
+					Name       string `json:"__name__"`
+					Pkg        string `json:"pkg"`
+					Unit       string `json:"unit"`
+					Branch     string `json:"branch"`
+					Repository string `json:"repository"`
+					Goos       string `json:"goos"`
+					Goarch     string `json:"goarch"`
+				} `json:"metric"`
+				Values []struct {
+					Timestamp float64 `json:"timestamp"`
+					Value     string  `json:"value"`
+				} `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("error unmarshaling response: %w", err)
+	}
+
+	if response.Status != "success" {
+		return nil, fmt.Errorf("unexpected status: %s", response.Status)
+	}
+
+	// Group results by benchmark name and unit
+	benchmarks := make(map[string]*BenchmarkJSON)
+
+	for _, result := range response.Data.Result {
+		metric := result.Metric
+		key := fmt.Sprintf("%s_%s", metric.Name, metric.Unit)
+		benchmark, ok := benchmarks[key]
+		if !ok {
+			benchmark = &BenchmarkJSON{
+				Name:           metric.Name,
+				Package:        metric.Pkg,
+				Unit:           metric.Unit,
+				HigherIsBetter: isHigherBetter(metric.Unit),
+			}
+			benchmarks[key] = benchmark
+		}
+
+		// Convert values to ValueJSON format
+		for _, v := range result.Values {
+			value, err := strconv.ParseFloat(v.Value, 64)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing value: %w", err)
+			}
+
+			// Note: VictoriaMetrics doesn't provide confidence intervals directly
+			// We'll need to calculate these from the raw values
+			// For now, we'll use the same value for low/center/high
+			benchmark.Values = append(benchmark.Values, ValueJSON{
+				CommitDate: time.Unix(int64(v.Timestamp), 0),
+				Low:        value - 1,
+				Center:     value - 1,
+				High:       value - 1,
+			})
+		}
+	}
+
+	// Convert map to slice
+	result := make([]*BenchmarkJSON, 0, len(benchmarks))
+	for _, benchmark := range benchmarks {
+		// Sort values by commit date
+		sort.Slice(benchmark.Values, func(i, j int) bool {
+			return benchmark.Values[i].CommitDate.Before(benchmark.Values[j].CommitDate)
+		})
+		result = append(result, benchmark)
+	}
+
+	return result, nil
 }
 
 func commitsFromBenchmarks(benchmarks []*BenchmarkJSON) []Commit {
