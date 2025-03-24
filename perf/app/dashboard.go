@@ -6,7 +6,6 @@ package app
 
 import (
 	"compress/gzip"
-	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -76,6 +75,8 @@ func (a *App) dashboardRegisterOnMux(mux *http.ServeMux) {
 	mux.HandleFunc("/dashboard/data.json", a.dashboardData)
 	mux.HandleFunc("/dashboard/formfields.json", a.formFields)
 	mux.HandleFunc("/dashboard/tests.json", a.dashboardTests)
+	mux.HandleFunc("/dashboard/metrics.json", a.listMetrics)
+	mux.HandleFunc("/dashboard/test_info.json", a.testInfo)
 }
 
 // DataJSON is the result of accessing the data.json endpoint.
@@ -91,7 +92,6 @@ type DataJSON struct {
 // the best fit for a graph.
 type BenchmarkJSON struct {
 	Name           string
-	Package        string
 	Unit           string
 	HigherIsBetter bool
 
@@ -171,112 +171,6 @@ func sanitizePromQLRegex(name string) string {
 	return strings.Replace(name, "/", "\\/", -1)
 }
 
-// fetchNamedUnitBenchmark queries VictoriaMetrics for a specific name + unit benchmark
-func fetchNamedUnitBenchmark(ctx context.Context, vmClient *VictoriaMetricsClient, start, end time.Time, repository, branch, pkg, name, unit string) (*BenchmarkJSON, error) {
-	if err := validatePromQLString(repository); err != nil {
-		return nil, fmt.Errorf("invalid repository name: %w", err)
-	}
-	if err := validatePromQLString(branch); err != nil {
-		return nil, fmt.Errorf("invalid branch name: %w", err)
-	}
-	if err := validatePromQLString(name); err != nil {
-		return nil, fmt.Errorf("invalid benchmark name: %w", err)
-	}
-	if err := validatePromQLString(unit); err != nil {
-		return nil, fmt.Errorf("invalid unit name: %w", err)
-	}
-
-	query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name="%s",unit="%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
-		pkg, name, unit, branch, repository)
-
-	data, err := vmClient.Query(ctx, query, start, end)
-	if err != nil {
-		return nil, fmt.Errorf("error performing query: %w", err)
-	}
-
-	benchmarks, err := parseVictoriaMetricsResponse(data)
-	if err != nil {
-		return nil, err
-	}
-	if len(benchmarks) == 0 {
-		return nil, errBenchmarkNotFound
-	}
-	if len(benchmarks) > 1 {
-		return nil, fmt.Errorf("query returned too many benchmarks: %+v", benchmarks)
-	}
-	return benchmarks[0], nil
-}
-
-// fetchNamedBenchmark queries VictoriaMetrics for all benchmark results with the passed
-// name (for all units)
-func fetchNamedBenchmark(ctx context.Context, vmClient *VictoriaMetricsClient, regressions bool, start, end time.Time, repository, branch, name, pkg string, regex bool) ([]*BenchmarkJSON, error) {
-	if err := validatePromQLString(repository); err != nil {
-		return nil, fmt.Errorf("invalid repository name: %w", err)
-	}
-	if err := validatePromQLString(branch); err != nil {
-		return nil, fmt.Errorf("invalid branch name: %w", err)
-	}
-	if err := validatePromQLString(name); err != nil {
-		return nil, fmt.Errorf("invalid benchmark name: %w", err)
-	}
-
-	var query string
-	if regex {
-		name = sanitizePromQLRegex(name)
-		query = fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name=~"%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
-			pkg, name, branch, repository)
-	} else {
-		query = fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name="%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
-			pkg, name, branch, repository)
-	}
-
-	data, err := vmClient.Query(ctx, query, start, end)
-	if err != nil {
-		return nil, fmt.Errorf("error performing query: %w", err)
-	}
-
-	benchmarks, err := parseVictoriaMetricsResponse(data)
-	if err != nil {
-		return nil, err
-	}
-	if len(benchmarks) == 0 {
-		return nil, errBenchmarkNotFound
-	}
-
-	if regressions {
-		return filterAndSortRegressions(benchmarks), nil
-	}
-	return benchmarks, nil
-}
-
-// fetchAllBenchmarks queries VictoriaMetrics for all benchmark results
-func fetchAllBenchmarks(ctx context.Context, vmClient *VictoriaMetricsClient, regressions bool, start, end time.Time, repository, branch string) ([]*BenchmarkJSON, error) {
-	if err := validatePromQLString(repository); err != nil {
-		return nil, fmt.Errorf("invalid repository name: %w", err)
-	}
-	if err := validatePromQLString(branch); err != nil {
-		return nil, fmt.Errorf("invalid branch name: %w", err)
-	}
-
-	query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
-		branch, repository)
-
-	data, err := vmClient.Query(ctx, query, start, end)
-	if err != nil {
-		return nil, fmt.Errorf("error performing query: %w", err)
-	}
-
-	benchmarks, err := parseVictoriaMetricsResponse(data)
-	if err != nil {
-		return nil, err
-	}
-
-	if regressions {
-		return filterAndSortRegressions(benchmarks), nil
-	}
-	return benchmarks, nil
-}
-
 type RegressionJSON struct {
 	Change         float64 // endpoint regression, if any
 	DeltaIndex     int     // index at which largest increase of regression occurs
@@ -306,11 +200,6 @@ func queryToJson(res *api.QueryTableResult) ([]*BenchmarkJSON, error) {
 			return nil, fmt.Errorf("record %s name value got type %T want string", rec, rec.ValueByKey("name"))
 		}
 
-		pkg, ok := rec.ValueByKey("pkg").(string)
-		if !ok {
-			return nil, fmt.Errorf("record %s name value got type %T want string", rec, rec.ValueByKey("pkg"))
-		}
-
 		unit, ok := rec.ValueByKey("unit").(string)
 		if !ok {
 			return nil, fmt.Errorf("record %s unit value got type %T want string", rec, rec.ValueByKey("unit"))
@@ -321,7 +210,6 @@ func queryToJson(res *api.QueryTableResult) ([]*BenchmarkJSON, error) {
 		if !ok {
 			b = &BenchmarkJSON{
 				Name:           name,
-				Package:        pkg,
 				Unit:           unit,
 				HigherIsBetter: isHigherBetter(unit),
 			}
@@ -568,9 +456,9 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 	vmClient := NewVictoriaMetricsClient(a.VictoriaMetricsURL)
 
-	repository := r.FormValue("repository")
-	if repository == "" {
-		repository = "cockroach"
+	cloud := r.FormValue("cloud")
+	if cloud == "" {
+		cloud = "gce"
 	}
 	branch := r.FormValue("branch")
 	if branch == "" {
@@ -578,18 +466,13 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	benchmark := r.FormValue("benchmark")
-	pkg := "pkg/bench"
-	if r.Form.Has("package") {
-		pkg = r.FormValue("package")
-	}
-
 	unit := r.FormValue("unit")
 	var benchmarks []*BenchmarkJSON
 
 	if unit != "" {
 		// Fetch a single and specific benchmark
-		query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name="%s",unit="%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
-			pkg, benchmark, unit, branch, repository)
+		query := fmt.Sprintf(`benchmark_result{test="%s",cloud="%s",branch="%s",unit="%s"}`,
+			benchmark, cloud, branch, unit)
 		data, err := vmClient.Query(ctx, query, start, end)
 		if err != nil {
 			log.Printf("Error querying VictoriaMetrics: %v", err)
@@ -597,7 +480,6 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Parse the VictoriaMetrics response and convert to BenchmarkJSON
-		// This part needs to be implemented based on the VictoriaMetrics response format
 		benchmarks, err = parseVictoriaMetricsResponse(data)
 		if err != nil {
 			log.Printf("Error parsing VictoriaMetrics response: %v", err)
@@ -606,8 +488,16 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Fetch all benchmarks matching the criteria
-		query := fmt.Sprintf(`benchmark_result{measurement="benchmark-result",pkg="%s",name=~"%s",branch="%s",repository="%s",goos="linux",goarch="amd64"}`,
-			pkg, benchmark, branch, repository)
+		// Use regexp matching for benchmark name, ensure unit is not empty
+		var benchmarkFilter string
+		if benchmark != "" {
+			benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
+		} else {
+			benchmarkFilter = ""
+		}
+
+		query := fmt.Sprintf(`benchmark_result{cloud="%s",branch="%s"%s,unit!=""}`,
+			cloud, branch, benchmarkFilter)
 		data, err := vmClient.Query(ctx, query, start, end)
 		if err != nil {
 			log.Printf("Error querying VictoriaMetrics: %v", err)
@@ -652,13 +542,13 @@ func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
 			ResultType string `json:"resultType"`
 			Result     []struct {
 				Metric struct {
-					Name       string `json:"__name__"`
-					Pkg        string `json:"pkg"`
-					Unit       string `json:"unit"`
-					Branch     string `json:"branch"`
-					Repository string `json:"repository"`
-					Goos       string `json:"goos"`
-					Goarch     string `json:"goarch"`
+					Name   string `json:"__name__"`
+					Test   string `json:"test"`
+					Unit   string `json:"unit"`
+					Branch string `json:"branch"`
+					Cloud  string `json:"cloud"`
+					Goos   string `json:"goos"`
+					Goarch string `json:"goarch"`
 				} `json:"metric"`
 				Values []struct {
 					Timestamp float64 `json:"timestamp"`
@@ -669,6 +559,8 @@ func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
 	}
 
 	if err := json.Unmarshal(data, &response); err != nil {
+		log.Printf("Error unmarshaling response: %v", err)
+		log.Printf("Raw response: %s", string(data))
 		return nil, fmt.Errorf("error unmarshaling response: %w", err)
 	}
 
@@ -676,17 +568,41 @@ func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
 		return nil, fmt.Errorf("unexpected status: %s", response.Status)
 	}
 
+	// Log the response data for debugging
+	if len(response.Data.Result) == 0 {
+		log.Printf("No metrics found in VictoriaMetrics response")
+		log.Printf("Raw response data: %s", string(data))
+		return nil, fmt.Errorf("no metrics found in response")
+	}
+
+	log.Printf("Found %d metrics in response", len(response.Data.Result))
+	metricNames := make(map[string]bool)
+	for _, result := range response.Data.Result {
+		metricNames[result.Metric.Name] = true
+		log.Printf("Metric: %s, Test: %s, Unit: %s, Branch: %s, Cloud: %s",
+			result.Metric.Name, result.Metric.Test, result.Metric.Unit,
+			result.Metric.Branch, result.Metric.Cloud)
+	}
+	log.Printf("Available metric names: %v", maps.Keys(metricNames))
+
 	// Group results by benchmark name and unit
 	benchmarks := make(map[string]*BenchmarkJSON)
 
 	for _, result := range response.Data.Result {
 		metric := result.Metric
-		key := fmt.Sprintf("%s_%s", metric.Name, metric.Unit)
+
+		// Skip metrics without test or unit
+		if metric.Test == "" || metric.Unit == "" {
+			log.Printf("Skipping metric %s without test or unit", metric.Name)
+			continue
+		}
+
+		// Use test and unit as key
+		key := fmt.Sprintf("%s_%s", metric.Test, metric.Unit)
 		benchmark, ok := benchmarks[key]
 		if !ok {
 			benchmark = &BenchmarkJSON{
-				Name:           metric.Name,
-				Package:        metric.Pkg,
+				Name:           metric.Test,
 				Unit:           metric.Unit,
 				HigherIsBetter: isHigherBetter(metric.Unit),
 			}
@@ -700,14 +616,20 @@ func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
 				return nil, fmt.Errorf("error parsing value: %w", err)
 			}
 
-			// Note: VictoriaMetrics doesn't provide confidence intervals directly
-			// We'll need to calculate these from the raw values
-			// For now, we'll use the same value for low/center/high
+			// Extract commit details from metadata or use placeholders
+			// For now, using placeholders as we don't know the exact structure
+			commitHash := "unknown"
+			baselineCommitHash := "baseline"
+			benchmarksCommitHash := "benchmarks"
+
 			benchmark.Values = append(benchmark.Values, ValueJSON{
-				CommitDate: time.Unix(int64(v.Timestamp), 0),
-				Low:        value - 1,
-				Center:     value - 1,
-				High:       value - 1,
+				CommitDate:           time.Unix(int64(v.Timestamp), 0),
+				CommitHash:           commitHash,
+				BaselineCommitHash:   baselineCommitHash,
+				BenchmarksCommitHash: benchmarksCommitHash,
+				Low:                  value - 0.05, // Estimate confidence interval
+				Center:               value,
+				High:                 value + 0.05, // Estimate confidence interval
 			})
 		}
 	}
@@ -826,6 +748,216 @@ func (a *App) dashboardTests(w http.ResponseWriter, r *http.Request) {
 	// Return the tests
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(TestsJSON{Tests: vmResponse.Data}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+// MetricsJSON is the response for the metrics.json endpoint
+type MetricsJSON struct {
+	Metrics []string `json:"metrics"`
+}
+
+// listMetrics handles the metrics.json endpoint, returning a list of all available metrics
+func (a *App) listMetrics(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Calculate the start time (30 days ago)
+	start := time.Now().Add(-30 * 24 * time.Hour)
+
+	// Construct the VictoriaMetrics query URL
+	url := fmt.Sprintf("%s/api/v1/label/__name__/values", a.VictoriaMetricsURL)
+
+	// Create the request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add query parameters
+	q := req.URL.Query()
+	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	req.URL.RawQuery = q.Encode()
+
+	// Make the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics: %v", err)
+		http.Error(w, "Error querying VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		http.Error(w, "Error reading response", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the response
+	var vmResponse struct {
+		Status string   `json:"status"`
+		Data   []string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &vmResponse); err != nil {
+		log.Printf("Error parsing response: %v", err)
+		http.Error(w, "Error parsing response", http.StatusInternalServerError)
+		return
+	}
+
+	if vmResponse.Status != "success" {
+		log.Printf("Unexpected status from VictoriaMetrics: %s", vmResponse.Status)
+		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the metrics
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(MetricsJSON{Metrics: vmResponse.Data}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+// TestInfoJSON is the response for the test_info.json endpoint
+type TestInfoJSON struct {
+	Test         string              `json:"test"`
+	MetricsCount int                 `json:"metrics_count"`
+	Labels       map[string][]string `json:"labels"`
+	Metrics      []string            `json:"metrics"`
+	SampleData   []map[string]any    `json:"sample_data"`
+}
+
+// testInfo handles the test_info.json endpoint, returning detailed information about a specific test
+func (a *App) testInfo(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get the test name from the query parameters
+	testName := r.FormValue("test")
+	if testName == "" {
+		http.Error(w, "test parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Calculate the start time (30 days ago)
+	start := time.Now().Add(-30 * 24 * time.Hour)
+	end := time.Now()
+
+	// 1. First get all metrics associated with this test
+	metricsURL := fmt.Sprintf("%s/api/v1/series", a.VictoriaMetricsURL)
+	metricsReq, err := http.NewRequestWithContext(ctx, "GET", metricsURL, nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add query parameters
+	q := metricsReq.URL.Query()
+	q.Add("match[]", fmt.Sprintf(`{test="%s"}`, testName))
+	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	q.Add("end", fmt.Sprintf("%d", end.Unix()))
+	metricsReq.URL.RawQuery = q.Encode()
+
+	// Make the request
+	client := &http.Client{}
+	metricsResp, err := client.Do(metricsReq)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics: %v", err)
+		http.Error(w, "Error querying VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+	defer metricsResp.Body.Close()
+
+	// Read the response
+	metricsBody, err := io.ReadAll(metricsResp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		http.Error(w, "Error reading response", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the response
+	var seriesResponse struct {
+		Status string              `json:"status"`
+		Data   []map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(metricsBody, &seriesResponse); err != nil {
+		log.Printf("Error parsing response: %v", err)
+		log.Printf("Raw response: %s", string(metricsBody))
+		http.Error(w, "Error parsing response", http.StatusInternalServerError)
+		return
+	}
+
+	if seriesResponse.Status != "success" {
+		log.Printf("Unexpected status from VictoriaMetrics: %s", seriesResponse.Status)
+		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+
+	if len(seriesResponse.Data) == 0 {
+		log.Printf("No metrics found for test: %s", testName)
+		http.Error(w, fmt.Sprintf("No metrics found for test: %s", testName), http.StatusNotFound)
+		return
+	}
+
+	// Process the response to extract metrics and labels
+	metrics := make([]string, 0)
+	labels := make(map[string][]string)
+	sampleData := make([]map[string]any, 0, 5) // Sample of up to 5 metrics
+
+	// Extract all unique metrics and labels
+	for i, series := range seriesResponse.Data {
+		if metricName, ok := series["__name__"]; ok {
+			metrics = append(metrics, metricName)
+		}
+
+		// For the first few series, save them as sample data
+		if i < 5 {
+			// Convert map[string]string to map[string]any
+			anySeries := make(map[string]any)
+			for k, v := range series {
+				anySeries[k] = v
+			}
+			sampleData = append(sampleData, anySeries)
+		}
+
+		// Collect all labels
+		for labelName, labelValue := range series {
+			if labelName == "__name__" {
+				continue // Skip the metric name itself
+			}
+
+			// Add to the list of values for this label
+			found := false
+			for _, existing := range labels[labelName] {
+				if existing == labelValue {
+					found = true
+					break
+				}
+			}
+			if !found {
+				labels[labelName] = append(labels[labelName], labelValue)
+			}
+		}
+	}
+
+	// Return the test information
+	response := TestInfoJSON{
+		Test:         testName,
+		MetricsCount: len(seriesResponse.Data),
+		Labels:       labels,
+		Metrics:      metrics,
+		SampleData:   sampleData,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Printf("Error encoding response: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 	}

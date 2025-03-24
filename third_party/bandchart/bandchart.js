@@ -10,10 +10,9 @@ function BandChart(data, {
 	marginLeft = 40, // left margin, in pixels
 	width = 480, // outer width, in pixels
 	height = 240, // outer height, in pixels
-	pkg,
 	benchmark,
 	unit,
-	repository,
+	cloud,
 	minViewDeltaPercent,
 	higherIsBetter,
 	history,
@@ -110,7 +109,6 @@ function BandChart(data, {
 	let unitLinkParams = new URLSearchParams(window.location.search);
 	unitLinkParams.set("unit", unit);
 	unitLinkParams.set("benchmark", benchmark);
-	unitLinkParams.set("package", pkg);
 
 	// Title (unit).
 	svg.append("g")

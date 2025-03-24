@@ -6,7 +6,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,43 +62,4 @@ func (c *VictoriaMetricsClient) Query(ctx context.Context, query string, start, 
 	}
 
 	return body, nil
-}
-
-// latestTimestamp returns the timestamp of the latest data point in VictoriaMetrics.
-func (c *VictoriaMetricsClient) latestTimestamp(ctx context.Context) (time.Time, error) {
-	// Query for the latest timestamp
-	query := `max_over_time(benchmark_result{measurement="benchmark-result"}[30d])`
-	end := time.Now()
-	start := end.Add(-30 * 24 * time.Hour) // 30 days
-
-	data, err := c.Query(ctx, query, start, end)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("error querying latest timestamp: %w", err)
-	}
-
-	// Parse the response to get the timestamp
-	var response struct {
-		Status string `json:"status"`
-		Data   struct {
-			Result []struct {
-				Value []interface{} `json:"value"` // [timestamp, value]
-			} `json:"result"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(data, &response); err != nil {
-		return time.Time{}, fmt.Errorf("error parsing response: %w", err)
-	}
-
-	if len(response.Data.Result) == 0 || len(response.Data.Result[0].Value) < 2 {
-		return time.Time{}, fmt.Errorf("no data found")
-	}
-
-	// The timestamp is the first element in the value array
-	timestamp, ok := response.Data.Result[0].Value[0].(float64)
-	if !ok {
-		return time.Time{}, fmt.Errorf("invalid timestamp format")
-	}
-
-	return time.Unix(int64(timestamp), 0), nil
 }

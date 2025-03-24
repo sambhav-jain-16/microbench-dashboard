@@ -19,7 +19,7 @@ license that can be found in the LICENSE file.
 
 <header class="Dashboard-topbar">
 	<h1>
-		<a href="/">CockroachDB Microbenchmark Dashboard</a>
+		<a href="/">CockroachDB Roachperf Dashboard</a>
 	</h1>
 </header>
 
@@ -27,9 +27,6 @@ license that can be found in the LICENSE file.
 	<form autocomplete="off" action="./">
 		<ul>
 			<li>
-				<div class="Dashboard-search-package">
-					<input id="package-input" type="text" name="package" placeholder="Package (optional)" />
-				</div>
 				<div class="Dashboard-search-benchmark">
 					<input id="benchmark-input" type="text" name="benchmark" placeholder="Type benchmark name..." />
 				</div>
@@ -48,9 +45,11 @@ license that can be found in the LICENSE file.
 			</li>
 			<span class="left-separator"></span>
 			<li>
-				Repository:
-				<select id="repository-select" name="repository">
-					<option>cockroach</option>
+				Cloud:
+				<select id="cloud-select" name="cloud">
+					<option value="gce">GCE</option>
+					<option value="aws">AWS</option>
+					<option value="azure">Azure</option>
 				</select>
 				branch:
 				<select id="branch-select" name="branch"></select>
@@ -139,8 +138,8 @@ function addCharts(benchmarks, repository, commits) {
 			dashboard.appendChild(section);
 
 			let link = document.createElement("a");
-			link.href = "?benchmark=" + bench.Name + "&package=" + bench.Package;
-			link.textContent = bench.Package + "→" + bench.Name;
+			link.href = "?benchmark=" + bench.Name;
+			link.textContent = bench.Name;
 
 			let title = document.createElement("h2");
 			title.classList.add("Dashboard-title");
@@ -171,11 +170,11 @@ function addCharts(benchmarks, repository, commits) {
 					diffText = "improvement";
 					isRegression = false;
 				}
-				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}&package=${bench.Package}#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
+				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
 
 				// Add a link to file a bug.
 				if (isRegression) {
-					const title = `affected/package: ${regression}% regression in ${bench.Name} ${bench.Unit} at ${shortCommit}`;
+					const title = `affected: ${regression}% regression in ${bench.Name} ${bench.Unit} at ${shortCommit}`;
 					const body = `Discovered a regression in ${bench.Unit} of ${regression}% for benchmark ${bench.Name} at ${shortCommit}.\n\n<ADD MORE DETAILS>.`
 					let query = `?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=Performance`;
 					p.innerHTML += ` <a href="https://github.com/cockroachdb/cockroach/issues/new${query}">File an issue</a>.`;
@@ -189,10 +188,9 @@ function addCharts(benchmarks, repository, commits) {
 			item.appendChild(p);
 		}
 		item.appendChild(BandChart(bench.Values, {
-			pkg: bench.Package,
 			benchmark: bench.Name,
 			unit: bench.Unit,
-			repository: repository,
+			cloud: cloudProvider,
 			minViewDeltaPercent: minViewDeltaPercent,
 			higherIsBetter: bench.HigherIsBetter,
 			history: commits,
@@ -216,7 +214,7 @@ function idToCommit(id) {
 	return null;
 }
 
-function addTable(bench, unit, repository, commits) {
+function addTable(bench, unit, cloudProvider, commits) {
 	let commitSelected = idToCommit(window.location.hash.slice(1));
 	let dashboard = document.getElementById("dashboard");
 
@@ -228,8 +226,8 @@ function addTable(bench, unit, repository, commits) {
 	dashboard.appendChild(section);
 
 	let link = document.createElement("a");
-	link.href = "?benchmark=" + bench.Name + "&unit=" + unit + "&package=" + bench.Package
-	link.textContent = bench.Package + "→" + bench.Name + " (" + unit + ")";
+	link.href = "?benchmark=" + bench.Name + "&unit=" + unit;
+	link.textContent = bench.Name + " (" + unit + ")";
 
 	let title = document.createElement("h2");
 	title.classList.add("Dashboard-title");
@@ -317,7 +315,7 @@ function addTable(bench, unit, repository, commits) {
 		}).format(c.Date), false));
 
 		// Commit hash.
-		const commitCell = createCommitCell(c.Hash, repository);
+		const commitCell = createCommitCell(c.Hash, cloudProvider);
 		commitCell.id = commitToId(c.Hash);
 		row.appendChild(commitCell);
 
@@ -331,10 +329,10 @@ function addTable(bench, unit, repository, commits) {
 			row.appendChild(range);
 
 			// Baseline commit hash.
-			row.appendChild(createCommitCell(v.BaselineCommitHash, repository));
+			row.appendChild(createCommitCell(v.BaselineCommitHash, cloudProvider));
 
 			// Runner commit hash (named Benchmarks commit internally / in influx).
-			row.appendChild(createCommitCell(v.BenchmarksCommitHash, repository));
+			row.appendChild(createCommitCell(v.BenchmarksCommitHash, cloudProvider));
 		} else {
 			// Row without info.
 			const range = createCell("", false);
@@ -395,14 +393,6 @@ function prefillSearch(formFields) {
 		input.value = benchmark;
 	}
 
-	let pkg = params.get('package');
-	let pkgInput = document.getElementById('package-input');
-	if (pkg) {
-		pkgInput.value = pkg;
-	} else if(!params.has('package')) {
-		pkgInput.value = "pkg/bench"
-	}
-
 	let unit = params.get('unit');
 	if (unit) {
 		let input = document.getElementById('unit-input');
@@ -421,10 +411,10 @@ function prefillSearch(formFields) {
 		input.checked = true;
 	}
 
-	let repository = params.get('repository');
-	if (repository) {
-		let select = document.getElementById('repository-select');
-		select.value = repository;
+	let cloud = params.get('cloud');
+	if (cloud) {
+		let select = document.getElementById('cloud-select');
+		select.value = cloud;
 	}
 
 	let branch = params.get('branch');
@@ -476,7 +466,7 @@ fetch('./formfields.json')
 
 // Grab the repository so we can plumb it into UI elements.
 // prefillSearch set this up for us just now.
-const repository = document.getElementById('repository-select').value;
+const cloudProvider = document.getElementById('cloud-select').value;
 
 // Fetch content.
 let benchmark = (new URLSearchParams(window.location.search)).get('benchmark');
@@ -512,11 +502,16 @@ fetch(dataURL)
 				failure(benchmark, "got more that one benchmark when a unit was specified");
 				throw new Error("Data fetch failed");
 			}
-			addTable(benchmarks[0], unit, repository, commits);
+			addTable(benchmarks[0], unit, cloudProvider, commits);
 		} else {
-			addCharts(benchmarks, repository, commits);
+			addCharts(benchmarks, cloudProvider, commits);
 		}
 	});
+
+// Set up the params for the link to the unit page.
+let unitLinkParams = new URLSearchParams(window.location.search);
+unitLinkParams.set("unit", unit);
+unitLinkParams.set("benchmark", benchmark);
 </script>
 
 </body>
