@@ -14,6 +14,22 @@
             color: #333;
             margin-bottom: 20px;
         }
+        .search-container {
+            margin-bottom: 20px;
+            position: relative;
+        }
+        .search-input {
+            width: 100%;
+            padding: 10px 15px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .search-input:focus {
+            border-color: #2c5282;
+        }
         .test-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -34,6 +50,9 @@
             color: #2c5282;
             text-decoration: none;
             font-size: 1.1em;
+            display: block;
+            word-wrap: break-word;
+            white-space: normal;
         }
         .test-card a:hover {
             text-decoration: underline;
@@ -53,17 +72,23 @@
             margin: 20px auto;
             max-width: 600px;
         }
+        .hidden {
+            display: none;
+        }
     </style>
 </head>
 <body class="Dashboard">
     <header class="Dashboard-topbar">
         <h1>
-            <a href="/">CockroachDB Microbenchmark Dashboard</a>
+            <a href="/">CockroachDB Roachperf Dashboard</a>
         </h1>
     </header>
 
     <div class="test-list">
-        <h1>Available Tests</h1>
+        <h1>Available Benchmarks</h1>
+        <div class="search-container">
+            <input type="text" id="searchInput" class="search-input" placeholder="Search tests...">
+        </div>
         <div id="test-grid" class="test-grid">
             <div class="loading">Loading tests...</div>
         </div>
@@ -89,8 +114,9 @@
             card.className = 'test-card';
             
             const link = document.createElement('a');
-            link.href = `./?benchmark=${encodeURIComponent(testName)}`;
+            link.href = `/dashboard/?benchmark=${encodeURIComponent(testName)}`;
             link.textContent = testName;
+            link.title = testName; // Show full name on hover
             
             card.appendChild(link);
             return card;
@@ -106,24 +132,44 @@
             `;
         }
 
+        function filterTests(tests, searchTerm) {
+            if (!searchTerm) return tests;
+            const term = searchTerm.toLowerCase();
+            return tests.filter(test => test.toLowerCase().includes(term));
+        }
+
+        function updateTestGrid(tests, searchTerm = '') {
+            const grid = document.getElementById('test-grid');
+            grid.innerHTML = ''; // Clear existing content
+            
+            const filteredTests = filterTests(tests, searchTerm);
+            
+            if (filteredTests.length === 0) {
+                grid.innerHTML = '<div class="error">No tests found</div>';
+                return;
+            }
+
+            filteredTests.forEach(test => {
+                grid.appendChild(createTestCard(test));
+            });
+        }
+
         // Initialize the page
+        let allTests = [];
         fetchTests()
             .then(tests => {
-                const grid = document.getElementById('test-grid');
-                grid.innerHTML = ''; // Clear loading message
-                
-                if (tests.length === 0) {
-                    grid.innerHTML = '<div class="error">No tests found</div>';
-                    return;
-                }
-
-                tests.forEach(test => {
-                    grid.appendChild(createTestCard(test));
-                });
+                allTests = tests;
+                updateTestGrid(tests);
             })
             .catch(error => {
                 displayError(error.message);
             });
+
+        // Add search functionality
+        const searchInput = document.getElementById('searchInput');
+        searchInput.addEventListener('input', (e) => {
+            updateTestGrid(allTests, e.target.value);
+        });
     </script>
 </body>
 </html> 
