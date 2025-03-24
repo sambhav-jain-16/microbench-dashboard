@@ -57,6 +57,10 @@ license that can be found in the LICENSE file.
 				<div class="Dashboard-duration">
 					<input id="days-input" type="number" name="days" value="90" />
 				</div>
+				Baseline (days):
+				<div class="Dashboard-baseline">
+					<input id="baseline-input" type="number" name="baseline" value="45" />
+				</div>
 				End (UTC): <input id="end-input" type="datetime-local" name="end" />
 				<input type="submit">
 			</li>
@@ -81,6 +85,13 @@ license that can be found in the LICENSE file.
 		more detail about each individual point in the selected time range.
 		Another way of reaching this page is to click the unit name that acts
 		as each graph's title, i.e. "sec/op".
+	</p>
+	<p>
+		<strong>Baseline Comparison:</strong> You can compare metrics against a historical baseline by adjusting the "Baseline" field (default: 45 days). 
+		When a baseline is set, each data point is compared to the same metric from the baseline period. The dashboard calculates this comparison locally—baseline
+		is not a label in VictoriaMetrics but rather a way to compare current metrics against historical data.
+		With Duration=90 and Baseline=45, each data point will be compared to its value from 45 days before the start of the 90-day window.
+		Positive values indicate regressions, negative values indicate improvements. This is particularly useful for identifying performance trends over time.
 	</p>
 </div>
 
@@ -124,6 +135,11 @@ function addCharts(benchmarks, repository, commits) {
 
 	removeLoadingMessage();
 
+	// Check if baseline comparison is active
+	const urlParams = new URLSearchParams(window.location.search);
+	const hasBaseline = urlParams.has('baseline') && urlParams.get('baseline') !== "0";
+	const baselineValue = urlParams.get('baseline');
+
 	let prevName = "";
 	let grid = null;
 	let addedChart = false;
@@ -138,12 +154,23 @@ function addCharts(benchmarks, repository, commits) {
 			dashboard.appendChild(section);
 
 			let link = document.createElement("a");
-			link.href = "?benchmark=" + bench.Name;
+			link.href = "?benchmark=" + bench.Name + (hasBaseline ? "&baseline=" + baselineValue : "");
 			link.textContent = bench.Name;
 
 			let title = document.createElement("h2");
 			title.classList.add("Dashboard-title");
 			title.appendChild(link);
+
+			// Add baseline indicator if applicable
+			if (hasBaseline) {
+				let baselineIndicator = document.createElement("span");
+				baselineIndicator.textContent = ` (showing ${baselineValue}-day baseline comparison)`;
+				baselineIndicator.style.fontSize = "smaller";
+				baselineIndicator.style.fontWeight = "normal";
+				baselineIndicator.style.fontStyle = "italic";
+				title.appendChild(baselineIndicator);
+			}
+
 			section.appendChild(title);
 
 			grid = document.createElement("grid");
@@ -170,7 +197,7 @@ function addCharts(benchmarks, repository, commits) {
 					diffText = "improvement";
 					isRegression = false;
 				}
-				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
+				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}${hasBaseline ? '&baseline=' + baselineValue : ''}#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
 
 				// Add a link to file a bug.
 				if (isRegression) {
@@ -187,9 +214,13 @@ function addCharts(benchmarks, repository, commits) {
 			}
 			item.appendChild(p);
 		}
+
+		// Create chart title with baseline indicator
+		const chartTitle = hasBaseline ? `${bench.Unit} (% change from baseline)` : bench.Unit;
+
 		item.appendChild(BandChart(bench.Values, {
 			benchmark: bench.Name,
-			unit: bench.Unit,
+			unit: chartTitle,
 			cloud: cloudProvider,
 			minViewDeltaPercent: minViewDeltaPercent,
 			higherIsBetter: bench.HigherIsBetter,
@@ -220,6 +251,11 @@ function addTable(bench, unit, cloudProvider, commits) {
 
 	removeLoadingMessage();
 
+	// Check if baseline comparison is active
+	const urlParams = new URLSearchParams(window.location.search);
+	const hasBaseline = urlParams.has('baseline') && urlParams.get('baseline') !== "0";
+	const baselineValue = urlParams.get('baseline');
+
 	let section = document.createElement("grid");
 	section.classList.add("Dashboard-section");
 	section.classList.add("Dashboard-section-expand");
@@ -227,12 +263,19 @@ function addTable(bench, unit, cloudProvider, commits) {
 
 	let link = document.createElement("a");
 	link.href = "?benchmark=" + bench.Name + "&unit=" + unit;
-	link.textContent = bench.Name + " (" + unit + ")";
+	let title = bench.Name + " (" + unit + ")";
+	
+	// Add baseline indicator if applicable
+	if (hasBaseline) {
+		title += ` - ${baselineValue}-day baseline comparison`;
+	}
+	
+	link.textContent = title;
 
-	let title = document.createElement("h2");
-	title.classList.add("Dashboard-title");
-	title.appendChild(link);
-	section.appendChild(title);
+	let titleElem = document.createElement("h2");
+	titleElem.classList.add("Dashboard-title");
+	titleElem.appendChild(link);
+	section.appendChild(titleElem);
 
 	const table = document.createElement("table");
 	table.classList.add("Dashboard-table");
@@ -262,7 +305,14 @@ function addTable(bench, unit, cloudProvider, commits) {
 	const header = document.createElement("tr");
 	header.appendChild(createCell("Date", true));
 	header.appendChild(createCell("Experiment commit", true));
-	header.appendChild(createCell("Delta", true));
+	
+	// Change column header based on baseline mode
+	if (hasBaseline) {
+		header.appendChild(createCell("% Change from baseline", true));
+	} else {
+		header.appendChild(createCell("Delta", true));
+	}
+	
 	header.appendChild(createCell("Baseline commit", true));
 	header.appendChild(createCell("runner commit", true));
 	table.appendChild(header);
@@ -322,9 +372,27 @@ function addTable(bench, unit, cloudProvider, commits) {
 		if (valuesByCommit.has(c.Hash)) {
 			const v = valuesByCommit.get(c.Hash);
 
-			// Range visualization.
+			// Range visualization - adjust display for baseline mode
 			const range = createCell("", false);
-			range.appendChild(Range(v.Low, v.Center, v.High, min, max, 640, 48, bench.Unit, bench.HigherIsBetter));
+			if (hasBaseline) {
+				// For baseline comparison, format as percentage
+				// Add a special class to style percentage changes
+				const changeClass = v.Center > 0 ? "regression" : (v.Center < 0 ? "improvement" : "");
+				const percentChange = document.createElement("div");
+				percentChange.classList.add("percent-change");
+				if (changeClass) {
+					percentChange.classList.add(changeClass);
+				}
+				
+				// Format the percentage value
+				const formattedValue = (v.Center * 100).toFixed(2) + "%";
+				percentChange.textContent = formattedValue;
+				
+				range.appendChild(percentChange);
+			} else {
+				// Normal range visualization
+				range.appendChild(Range(v.Low, v.Center, v.High, min, max, 640, 48, bench.Unit, bench.HigherIsBetter));
+			}
 			range.classList.add("Dashboard-table-range")
 			row.appendChild(range);
 
@@ -432,6 +500,12 @@ function prefillSearch(formFields) {
 		let input = document.getElementById('days-input');
 		input.value = days;
 	}
+	
+	let baseline = params.get('baseline');
+	if (baseline) {
+		let input = document.getElementById('baseline-input');
+		input.value = baseline;
+	}
 
 	let end = params.get('end');
 	let input = document.getElementById('end-input');
@@ -512,6 +586,10 @@ fetch(dataURL)
 let unitLinkParams = new URLSearchParams(window.location.search);
 unitLinkParams.set("unit", unit);
 unitLinkParams.set("benchmark", benchmark);
+// Preserve baseline parameter if it exists
+if (urlParams.has('baseline')) {
+	unitLinkParams.set("baseline", urlParams.get('baseline'));
+}
 </script>
 
 </body>

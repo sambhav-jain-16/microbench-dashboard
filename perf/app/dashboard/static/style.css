@@ -149,8 +149,14 @@ input[type=submit] {
 
 .Dashboard-duration {
   display: inline-block;
-  width: 4em;
+  width: 60px;
 }
+
+.Dashboard-baseline {
+  display: inline-block;
+  width: 60px;
+}
+
 input[type=number] {
   width: 100%;
 }
@@ -211,8 +217,26 @@ input[type=number] {
   margin: 0 auto;
 }
 .Dashboard-regression-description {
-  display: inline-block;
-  width: 480px;
-  font-style: oblique;
+  font-style: italic;
+  margin-top: 0;
+  margin-bottom: 0.5em;
+}
+
+/* Styles for baseline comparison mode */
+.percent-change {
+  font-weight: bold;
+  font-size: 18px;
   text-align: center;
+  padding: 10px;
+  border-radius: 4px;
+}
+
+.percent-change.regression {
+  color: #d32f2f;
+  background-color: rgba(211, 47, 47, 0.1);
+}
+
+.percent-change.improvement {
+  color: #388e3c;
+  background-color: rgba(56, 142, 60, 0.1);
 }

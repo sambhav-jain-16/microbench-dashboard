@@ -77,6 +77,7 @@ func (a *App) dashboardRegisterOnMux(mux *http.ServeMux) {
 	mux.HandleFunc("/dashboard/tests.json", a.dashboardTests)
 	mux.HandleFunc("/dashboard/metrics.json", a.listMetrics)
 	mux.HandleFunc("/dashboard/test_info.json", a.testInfo)
+	mux.HandleFunc("/dashboard/series_data.json", a.seriesDataToBenchmark)
 }
 
 // DataJSON is the result of accessing the data.json endpoint.
@@ -435,6 +436,19 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse the baseline parameter (days to compare against)
+	baseline := uint64(45) // Default baseline of 45 days
+	baselineParam := r.FormValue("baseline")
+	if baselineParam != "" {
+		var err error
+		baseline, err = strconv.ParseUint(baselineParam, 10, 32)
+		if err != nil {
+			log.Printf("Error parsing baseline %q: %v", baselineParam, err)
+			http.Error(w, "baseline parameter must be a positive integer", http.StatusBadRequest)
+			return
+		}
+	}
+
 	end := time.Now()
 	endParam := r.FormValue("end")
 	if endParam != "" {
@@ -448,6 +462,25 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := end.Add(-24 * time.Hour * time.Duration(days))
+
+	// Calculate baseline start and end times if a baseline was specified
+	var baselineStart, baselineEnd time.Time
+	if baseline > 0 {
+		baselineEnd = start
+		baselineStart = baselineEnd.Add(-24 * time.Hour * time.Duration(baseline))
+		log.Printf("Query time ranges: Current period: %s to %s (%d days); Baseline period: %s to %s (%d days)",
+			start.Format(time.RFC3339),
+			end.Format(time.RFC3339),
+			days,
+			baselineStart.Format(time.RFC3339),
+			baselineEnd.Format(time.RFC3339),
+			baseline)
+	} else {
+		log.Printf("Query time range: %s to %s (%d days, no baseline)",
+			start.Format(time.RFC3339),
+			end.Format(time.RFC3339),
+			days)
+	}
 
 	methStart := time.Now()
 	defer func() {
@@ -468,48 +501,142 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	benchmark := r.FormValue("benchmark")
 	unit := r.FormValue("unit")
 	var benchmarks []*BenchmarkJSON
+	var err error
+	var data []byte
+	var baselineData []byte
 
-	if unit != "" {
-		// Fetch a single and specific benchmark
-		query := fmt.Sprintf(`benchmark_result{test="%s",cloud="%s",branch="%s",unit="%s"}`,
-			benchmark, cloud, branch, unit)
-		data, err := vmClient.Query(ctx, query, start, end)
+	// Build the query string
+	var query string
+	// First, try to get the list of available metrics
+	metricsURL := fmt.Sprintf("%s/api/v1/series", a.VictoriaMetricsURL)
+	metricsReq, err := http.NewRequestWithContext(ctx, "GET", metricsURL, nil)
+	if err != nil {
+		log.Printf("Error creating request for metrics: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add query parameters to find any metrics
+	if benchmark != "" {
+		// If we have a benchmark name, query for that specific test
+		q := metricsReq.URL.Query()
+		q.Add("match[]", fmt.Sprintf(`{test="%s"}`, benchmark))
+		q.Add("start", fmt.Sprintf("%d", start.Unix()))
+		q.Add("end", fmt.Sprintf("%d", end.Unix()))
+		metricsReq.URL.RawQuery = q.Encode()
+
+		// Make the request to find available metrics
+		client := &http.Client{}
+		metricsResp, err := client.Do(metricsReq)
 		if err != nil {
-			log.Printf("Error querying VictoriaMetrics: %v", err)
-			http.Error(w, "Error querying VictoriaMetrics", 500)
-			return
-		}
-		// Parse the VictoriaMetrics response and convert to BenchmarkJSON
-		benchmarks, err = parseVictoriaMetricsResponse(data)
-		if err != nil {
-			log.Printf("Error parsing VictoriaMetrics response: %v", err)
-			http.Error(w, "Error parsing VictoriaMetrics response", 500)
-			return
-		}
-	} else {
-		// Fetch all benchmarks matching the criteria
-		// Use regexp matching for benchmark name, ensure unit is not empty
-		var benchmarkFilter string
-		if benchmark != "" {
-			benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
+			log.Printf("Error querying VictoriaMetrics for metrics: %v", err)
 		} else {
-			benchmarkFilter = ""
-		}
+			defer metricsResp.Body.Close()
+			metricsBody, err := io.ReadAll(metricsResp.Body)
+			if err == nil {
+				var seriesResponse struct {
+					Status string              `json:"status"`
+					Data   []map[string]string `json:"data"`
+				}
+				if err := json.Unmarshal(metricsBody, &seriesResponse); err == nil &&
+					seriesResponse.Status == "success" && len(seriesResponse.Data) > 0 {
 
-		query := fmt.Sprintf(`benchmark_result{cloud="%s",branch="%s"%s,unit!=""}`,
-			cloud, branch, benchmarkFilter)
-		data, err := vmClient.Query(ctx, query, start, end)
+					// Extract unique metric names
+					metricNames := make([]string, 0)
+					for _, series := range seriesResponse.Data {
+						if metricName, ok := series["__name__"]; ok {
+							found := false
+							for _, existing := range metricNames {
+								if existing == metricName {
+									found = true
+									break
+								}
+							}
+							if !found {
+								metricNames = append(metricNames, metricName)
+							}
+						}
+					}
+
+					if len(metricNames) > 0 {
+						log.Printf("Found metrics for test %s: %v", benchmark, metricNames)
+
+						// Use the first metric found for the specific test
+						if unit != "" {
+							// Specific benchmark and unit query
+							log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s, unit=%s",
+								metricNames[0], benchmark, cloud, branch, unit)
+							query = fmt.Sprintf(`%s{test="%s",cloud="%s",branch="%s",unit="%s"}`,
+								metricNames[0], benchmark, cloud, branch, unit)
+						} else {
+							// Query for all units of this test
+							var benchmarkFilter string
+							if benchmark != "" {
+								benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
+							} else {
+								benchmarkFilter = ""
+							}
+
+							log.Printf("Querying for metric=%s, cloud=%s, branch=%s, test filter=%s",
+								metricNames[0], cloud, branch, benchmarkFilter)
+							query = fmt.Sprintf(`%s{cloud="%s",branch="%s"%s,unit!=""}`,
+								metricNames[0], cloud, branch, benchmarkFilter)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If we couldn't determine a specific metric, fall back to a generic query
+	if query == "" {
+		if unit != "" {
+			// Fetch a single and specific benchmark
+			log.Printf("Querying for test=%s, cloud=%s, branch=%s, unit=%s (no specific metric)",
+				benchmark, cloud, branch, unit)
+			query = fmt.Sprintf(`{test="%s",cloud="%s",branch="%s",unit="%s"}`,
+				benchmark, cloud, branch, unit)
+		} else {
+			// Fetch all benchmarks matching the criteria
+			// Use regexp matching for benchmark name, ensure unit is not empty
+			var benchmarkFilter string
+			if benchmark != "" {
+				benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
+			} else {
+				benchmarkFilter = ""
+			}
+
+			log.Printf("Querying for cloud=%s, branch=%s, test filter=%s (no specific metric)",
+				cloud, branch, benchmarkFilter)
+			query = fmt.Sprintf(`{cloud="%s",branch="%s"%s,unit!=""}`,
+				cloud, branch, benchmarkFilter)
+		}
+	}
+
+	// Get current data
+	data, err = vmClient.Query(ctx, query, start, end)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics: %v", err)
+		http.Error(w, "Error querying VictoriaMetrics", 500)
+		return
+	}
+
+	// Get baseline data if requested
+	if baseline > 0 {
+		baselineData, err = vmClient.Query(ctx, query, baselineStart, baselineEnd)
 		if err != nil {
-			log.Printf("Error querying VictoriaMetrics: %v", err)
-			http.Error(w, "Error querying VictoriaMetrics", 500)
+			log.Printf("Error querying VictoriaMetrics for baseline: %v", err)
+			http.Error(w, "Error querying VictoriaMetrics for baseline data", 500)
 			return
 		}
-		benchmarks, err = parseVictoriaMetricsResponse(data)
-		if err != nil {
-			log.Printf("Error parsing VictoriaMetrics response: %v", err)
-			http.Error(w, "Error parsing VictoriaMetrics response", 500)
-			return
-		}
+	}
+
+	// Parse the main response and convert to BenchmarkJSON
+	benchmarks, err = parseVictoriaMetricsResponse(data, baseline > 0, baselineData)
+	if err != nil {
+		log.Printf("Error parsing VictoriaMetrics response: %v", err)
+		http.Error(w, "Error parsing VictoriaMetrics response: "+err.Error(), 500)
+		return
 	}
 
 	if len(benchmarks) == 0 {
@@ -535,7 +662,97 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseVictoriaMetricsResponse parses the VictoriaMetrics response into BenchmarkJSON format
-func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
+func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []byte) ([]*BenchmarkJSON, error) {
+	// First try to use the benchfmt-based comparison if both current and baseline data are available
+	if hasBaseline && baselineData != nil {
+		// Try the new comparison method using benchfmt
+		log.Printf("Attempting to parse data with benchfmt comparison method")
+		currentMetrics, err := convertVMDataToMetricPoints(data)
+		if err == nil && len(currentMetrics) > 0 {
+			baselineMetrics, err := convertVMDataToMetricPoints(baselineData)
+			if err == nil && len(baselineMetrics) > 0 {
+				// Log metrics counts for debugging
+				log.Printf("Found %d current metrics and %d baseline metrics for benchfmt comparison",
+					len(currentMetrics), len(baselineMetrics))
+
+				// Log all current metric keys and their point counts
+				log.Printf("Current metrics:")
+				for key, points := range currentMetrics {
+					log.Printf("  - %s: %d points", key, len(points))
+					if len(points) > 0 {
+						startTime := points[0].Timestamp.Format(time.RFC3339)
+						endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
+						log.Printf("    Time range: %s to %s", startTime, endTime)
+					}
+				}
+
+				// Log all baseline metric keys and their point counts
+				log.Printf("Baseline metrics:")
+				for key, points := range baselineMetrics {
+					log.Printf("  - %s: %d points", key, len(points))
+					if len(points) > 0 {
+						startTime := points[0].Timestamp.Format(time.RFC3339)
+						endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
+						log.Printf("    Time range: %s to %s", startTime, endTime)
+					}
+				}
+
+				// Try to create comparisons using the benchfmt approach
+				compBenchmarks, err := createBenchmarkComparisons(currentMetrics, baselineMetrics)
+				if err == nil && len(compBenchmarks) > 0 {
+					log.Printf("Successfully created %d benchmark comparisons using benchfmt", len(compBenchmarks))
+
+					// Log the comparisons created
+					for i, b := range compBenchmarks {
+						log.Printf("Comparison %d: %s (%s) with %d values",
+							i, b.Name, b.Unit, len(b.Values))
+					}
+
+					return compBenchmarks, nil
+				} else if err != nil {
+					log.Printf("Error creating benchmark comparisons: %v", err)
+				} else {
+					log.Printf("No comparisons created with benchfmt method - no matching metrics between current and baseline")
+				}
+			} else {
+				if err != nil {
+					log.Printf("Error converting baseline data to metric points: %v", err)
+				} else {
+					log.Printf("No baseline metrics found in VictoriaMetrics response")
+
+					// Check for baseline data but empty results
+					if baselineData != nil {
+						var baselinePreview string
+						if len(baselineData) > 500 {
+							baselinePreview = string(baselineData[:500]) + "... [truncated]"
+						} else {
+							baselinePreview = string(baselineData)
+						}
+						log.Printf("Baseline data exists but no metrics extracted. Baseline data preview: %s", baselinePreview)
+					}
+				}
+			}
+		} else {
+			if err != nil {
+				log.Printf("Error converting current data to metric points: %v", err)
+			} else {
+				log.Printf("No current metrics found in VictoriaMetrics response")
+
+				// Check for current data but empty results
+				if data != nil {
+					var dataPreview string
+					if len(data) > 500 {
+						dataPreview = string(data[:500]) + "... [truncated]"
+					} else {
+						dataPreview = string(data)
+					}
+					log.Printf("Current data exists but no metrics extracted. Current data preview: %s", dataPreview)
+				}
+			}
+		}
+	}
+
+	// Fall back to the original implementation
 	var response struct {
 		Status string `json:"status"`
 		Data   struct {
@@ -550,10 +767,7 @@ func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
 					Goos   string `json:"goos"`
 					Goarch string `json:"goarch"`
 				} `json:"metric"`
-				Values []struct {
-					Timestamp float64 `json:"timestamp"`
-					Value     string  `json:"value"`
-				} `json:"values"`
+				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 			} `json:"result"`
 		} `json:"data"`
 	}
@@ -569,64 +783,206 @@ func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
 	}
 
 	// Log the response data for debugging
+	log.Printf("Response status: %s, result type: %s, result count: %d",
+		response.Status, response.Data.ResultType, len(response.Data.Result))
+
 	if len(response.Data.Result) == 0 {
 		log.Printf("No metrics found in VictoriaMetrics response")
-		log.Printf("Raw response data: %s", string(data))
-		return nil, fmt.Errorf("no metrics found in response")
-	}
 
-	log.Printf("Found %d metrics in response", len(response.Data.Result))
-	metricNames := make(map[string]bool)
-	for _, result := range response.Data.Result {
-		metricNames[result.Metric.Name] = true
-		log.Printf("Metric: %s, Test: %s, Unit: %s, Branch: %s, Cloud: %s",
-			result.Metric.Name, result.Metric.Test, result.Metric.Unit,
-			result.Metric.Branch, result.Metric.Cloud)
+		// Try to extract more details about the empty response
+		var rawResponse map[string]interface{}
+		if err := json.Unmarshal(data, &rawResponse); err == nil {
+			if data, ok := rawResponse["data"].(map[string]interface{}); ok {
+				log.Printf("Data object keys: %v", maps.Keys(data))
+				if resultType, ok := data["resultType"].(string); ok {
+					log.Printf("Result type: %s", resultType)
+				}
+				// Look for any extra fields that might provide context
+				for k, v := range data {
+					if k != "result" && k != "resultType" {
+						log.Printf("Additional data field: %s = %v", k, v)
+					}
+				}
+			}
+		}
+
+		if hasBaseline {
+			log.Printf("Attempting to use baseline data anyway")
+
+			// Try with baseline data
+			var baselineResponse struct {
+				Status string `json:"status"`
+				Data   struct {
+					ResultType string `json:"resultType"`
+					Result     []struct {
+						Metric struct {
+							Name   string `json:"__name__"`
+							Test   string `json:"test"`
+							Unit   string `json:"unit"`
+							Branch string `json:"branch"`
+							Cloud  string `json:"cloud"`
+						} `json:"metric"`
+						Values [][]interface{} `json:"values"`
+					} `json:"result"`
+				} `json:"data"`
+			}
+
+			if err := json.Unmarshal(baselineData, &baselineResponse); err == nil &&
+				baselineResponse.Status == "success" && len(baselineResponse.Data.Result) > 0 {
+
+				log.Printf("Found %d metrics in baseline data, using those",
+					len(baselineResponse.Data.Result))
+
+				// Create benchmarks from baseline data
+				benchmarks := make([]*BenchmarkJSON, 0)
+
+				for _, result := range baselineResponse.Data.Result {
+					if result.Metric.Test == "" || result.Metric.Unit == "" {
+						continue
+					}
+
+					benchmark := &BenchmarkJSON{
+						Name:           result.Metric.Test,
+						Unit:           result.Metric.Unit,
+						HigherIsBetter: isHigherBetter(result.Metric.Unit),
+						Values:         []ValueJSON{},
+					}
+
+					// Add values from baseline
+					for _, v := range result.Values {
+						if len(v) != 2 {
+							continue
+						}
+
+						ts, ok := v[0].(float64)
+						if !ok {
+							continue
+						}
+
+						var valStr string
+						switch val := v[1].(type) {
+						case string:
+							valStr = val
+						case float64:
+							valStr = fmt.Sprintf("%f", val)
+						default:
+							continue
+						}
+
+						value, err := strconv.ParseFloat(valStr, 64)
+						if err != nil {
+							continue
+						}
+
+						benchmark.Values = append(benchmark.Values, ValueJSON{
+							CommitDate:           time.Unix(int64(ts), 0),
+							CommitHash:           fmt.Sprintf("%d", int64(ts)),
+							BaselineCommitHash:   "baseline",
+							BenchmarksCommitHash: "benchmarks",
+							Low:                  value - 0.05,
+							Center:               value,
+							High:                 value + 0.05,
+						})
+					}
+
+					if len(benchmark.Values) > 0 {
+						sort.Slice(benchmark.Values, func(i, j int) bool {
+							return benchmark.Values[i].CommitDate.Before(benchmark.Values[j].CommitDate)
+						})
+						benchmarks = append(benchmarks, benchmark)
+					}
+				}
+
+				if len(benchmarks) > 0 {
+					log.Printf("Created %d benchmarks from baseline data", len(benchmarks))
+					return benchmarks, nil
+				}
+			} else {
+				log.Printf("No usable metrics found in baseline data either")
+				if err != nil {
+					log.Printf("Error parsing baseline data: %v", err)
+				}
+			}
+		}
+
+		// Modified the error message to be more specific about the empty result
+		return nil, fmt.Errorf("no metrics found in response (result array is empty)")
 	}
-	log.Printf("Available metric names: %v", maps.Keys(metricNames))
 
 	// Group results by benchmark name and unit
 	benchmarks := make(map[string]*BenchmarkJSON)
 
 	for _, result := range response.Data.Result {
-		metric := result.Metric
+		// Log the metric details for debugging
+		log.Printf("Processing metric: %v", result.Metric)
 
-		// Skip metrics without test or unit
-		if metric.Test == "" || metric.Unit == "" {
-			log.Printf("Skipping metric %s without test or unit", metric.Name)
+		// Extract unit
+		unit := "ops/s"           // default
+		unit = result.Metric.Unit // Access unit as a struct field
+
+		// Create the key for this metric series
+		testName := result.Metric.Test // Access test as a struct field
+		if testName == "" {
+			log.Printf("Skipping metric with empty test name: %v", result.Metric)
 			continue
 		}
 
-		// Use test and unit as key
-		key := fmt.Sprintf("%s_%s", metric.Test, metric.Unit)
-		benchmark, ok := benchmarks[key]
+		// Try to get the metric name - use the Name field directly
+		metricName := result.Metric.Name
+
+		metricKey := fmt.Sprintf("%s_%s", testName, unit)
+		log.Printf("Processing metric key: %s (metric name: %s) with %d values",
+			metricKey, metricName, len(result.Values))
+
+		benchmark, ok := benchmarks[metricKey]
 		if !ok {
 			benchmark = &BenchmarkJSON{
-				Name:           metric.Test,
-				Unit:           metric.Unit,
-				HigherIsBetter: isHigherBetter(metric.Unit),
+				Name:           testName,
+				Unit:           unit,
+				HigherIsBetter: isHigherBetter(unit),
+				Values:         []ValueJSON{},
 			}
-			benchmarks[key] = benchmark
+			benchmarks[metricKey] = benchmark
 		}
 
 		// Convert values to ValueJSON format
 		for _, v := range result.Values {
-			value, err := strconv.ParseFloat(v.Value, 64)
-			if err != nil {
-				return nil, fmt.Errorf("error parsing value: %w", err)
+			if len(v) != 2 {
+				log.Printf("Skipping invalid data point in metric %s: %v", metricKey, v)
+				continue // Skip invalid data points
 			}
 
-			// Extract commit details from metadata or use placeholders
-			// For now, using placeholders as we don't know the exact structure
-			commitHash := "unknown"
-			baselineCommitHash := "baseline"
-			benchmarksCommitHash := "benchmarks"
+			// Extract timestamp and value from the array
+			ts, ok := v[0].(float64)
+			if !ok {
+				log.Printf("Invalid timestamp format in metric %s: %v", metricKey, v[0])
+				continue
+			}
 
+			// Value might be either string or float64 depending on the VictoriaMetrics version
+			var valStr string
+			switch val := v[1].(type) {
+			case string:
+				valStr = val
+			case float64:
+				valStr = fmt.Sprintf("%f", val)
+			default:
+				log.Printf("Invalid value format in metric %s: %v", metricKey, v[1])
+				continue
+			}
+
+			value, err := strconv.ParseFloat(valStr, 64)
+			if err != nil {
+				log.Printf("Error parsing value in metric %s: %v", metricKey, err)
+				continue
+			}
+
+			// Create a ValueJSON with confidence intervals
 			benchmark.Values = append(benchmark.Values, ValueJSON{
-				CommitDate:           time.Unix(int64(v.Timestamp), 0),
-				CommitHash:           commitHash,
-				BaselineCommitHash:   baselineCommitHash,
-				BenchmarksCommitHash: benchmarksCommitHash,
+				CommitDate:           time.Unix(int64(ts), 0),
+				CommitHash:           fmt.Sprintf("%d", int64(ts)), // Use timestamp as hash for now
+				BaselineCommitHash:   "baseline",
+				BenchmarksCommitHash: "benchmarks",
 				Low:                  value - 0.05, // Estimate confidence interval
 				Center:               value,
 				High:                 value + 0.05, // Estimate confidence interval
@@ -645,6 +1001,52 @@ func parseVictoriaMetricsResponse(data []byte) ([]*BenchmarkJSON, error) {
 	}
 
 	return result, nil
+}
+
+// logBaselineStats logs statistics about baseline comparison matching to help with debugging
+func logBaselineStats(benchmarks []*BenchmarkJSON, baselineValues map[string]map[string]float64) {
+	matchCount := 0
+	totalPoints := 0
+
+	for _, benchmark := range benchmarks {
+		key := fmt.Sprintf("%s_%s", benchmark.Name, benchmark.Unit)
+		if baselineMap, ok := baselineValues[key]; ok {
+			// Count baseline matches for this benchmark
+			benchMatchCount := 0
+			for _, v := range benchmark.Values {
+				dateStr := v.CommitDate.Format("2006-01-02")
+				if _, hasMatch := baselineMap[dateStr]; hasMatch {
+					benchMatchCount++
+				}
+			}
+
+			matchRate := 0.0
+			if len(benchmark.Values) > 0 {
+				matchRate = float64(benchMatchCount) / float64(len(benchmark.Values)) * 100
+			}
+
+			log.Printf("Baseline stats for %s: %d/%d points matched (%.1f%%)",
+				key, benchMatchCount, len(benchmark.Values), matchRate)
+
+			matchCount += benchMatchCount
+			totalPoints += len(benchmark.Values)
+		} else {
+			log.Printf("No baseline data found for %s", key)
+			totalPoints += len(benchmark.Values)
+		}
+	}
+
+	// Log overall statistics
+	overallRate := 0.0
+	if totalPoints > 0 {
+		overallRate = float64(matchCount) / float64(totalPoints) * 100
+	}
+	log.Printf("Overall baseline match rate: %d/%d points (%.1f%%)",
+		matchCount, totalPoints, overallRate)
+
+	if matchCount == 0 && totalPoints > 0 {
+		log.Printf("WARNING: No baseline matches found! Check that the baseline period contains data.")
+	}
 }
 
 func commitsFromBenchmarks(benchmarks []*BenchmarkJSON) []Commit {
@@ -961,4 +1363,503 @@ func (a *App) testInfo(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error encoding response: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 	}
+}
+
+// SeriesDataJSON is the response for the series_data.json endpoint
+type SeriesDataJSON struct {
+	Benchmarks []*BenchmarkJSON `json:"benchmarks"`
+	Commits    []Commit         `json:"commits"`
+}
+
+// seriesDataToBenchmark handles converting VictoriaMetrics series data to BenchmarkJSON format
+func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get the test name from the query parameters
+	testName := r.FormValue("test")
+	if testName == "" {
+		http.Error(w, "test parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	cloud := r.FormValue("cloud")
+	if cloud == "" {
+		cloud = "gce"
+	}
+	branch := r.FormValue("branch")
+	if branch == "" {
+		branch = "master"
+	}
+
+	// Calculate time range
+	days := uint64(defaultDays)
+	dayParam := r.FormValue("days")
+	if dayParam != "" {
+		var err error
+		days, err = strconv.ParseUint(dayParam, 10, 32)
+		if err != nil {
+			log.Printf("Error parsing days %q: %v", dayParam, err)
+			http.Error(w, fmt.Sprintf("day parameter must be a positive integer less than or equal to %d", maxDays), http.StatusBadRequest)
+			return
+		}
+		if days == 0 || days > maxDays {
+			log.Printf("days %d too large", days)
+			http.Error(w, fmt.Sprintf("day parameter must be a positive integer less than or equal to %d", maxDays), http.StatusBadRequest)
+			return
+		}
+	}
+
+	end := time.Now()
+	endParam := r.FormValue("end")
+	if endParam != "" {
+		var err error
+		end, err = time.Parse("2006-01-02T15:04", endParam)
+		if err != nil {
+			log.Printf("Error parsing end %q: %v", endParam, err)
+			http.Error(w, "end parameter must be a timestamp similar to RFC3339 without a time zone, like 2000-12-31T15:00", http.StatusBadRequest)
+			return
+		}
+	}
+
+	start := end.Add(-24 * time.Hour * time.Duration(days))
+
+	// 1. First get all metrics associated with this test
+	metricsURL := fmt.Sprintf("%s/api/v1/series", a.VictoriaMetricsURL)
+	metricsReq, err := http.NewRequestWithContext(ctx, "GET", metricsURL, nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add query parameters
+	q := metricsReq.URL.Query()
+	q.Add("match[]", fmt.Sprintf(`{test="%s",cloud="%s",branch="%s"}`, testName, cloud, branch))
+	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	q.Add("end", fmt.Sprintf("%d", end.Unix()))
+	metricsReq.URL.RawQuery = q.Encode()
+
+	// Make the request
+	client := &http.Client{}
+	metricsResp, err := client.Do(metricsReq)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics: %v", err)
+		http.Error(w, "Error querying VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+	defer metricsResp.Body.Close()
+
+	// Read the response
+	metricsBody, err := io.ReadAll(metricsResp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		http.Error(w, "Error reading response", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the response
+	var seriesResponse struct {
+		Status string              `json:"status"`
+		Data   []map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(metricsBody, &seriesResponse); err != nil {
+		log.Printf("Error parsing response: %v", err)
+		log.Printf("Raw response: %s", string(metricsBody))
+		http.Error(w, "Error parsing response", http.StatusInternalServerError)
+		return
+	}
+
+	if seriesResponse.Status != "success" {
+		log.Printf("Unexpected status from VictoriaMetrics: %s", seriesResponse.Status)
+		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+
+	if len(seriesResponse.Data) == 0 {
+		log.Printf("No metrics found for test: %s", testName)
+		http.Error(w, fmt.Sprintf("No metrics found for test: %s", testName), http.StatusNotFound)
+		return
+	}
+
+	// Extract the metric names
+	metricNames := make(map[string]bool)
+	for _, series := range seriesResponse.Data {
+		if metricName, ok := series["__name__"]; ok {
+			metricNames[metricName] = true
+		}
+	}
+
+	// Collect all time series data for each metric
+	benchmarkData := make([]*BenchmarkJSON, 0)
+	for metricName := range metricNames {
+		// Query data for this specific metric
+		query := fmt.Sprintf(`%s{test="%s",cloud="%s",branch="%s"}`, metricName, testName, cloud, branch)
+		log.Printf("Querying for metric %s data", metricName)
+
+		// Fetch data for this metric
+		data, err := a.vmClient.Query(ctx, query, start, end)
+		if err != nil {
+			log.Printf("Error querying VictoriaMetrics for metric %s: %v", metricName, err)
+			continue
+		}
+
+		// Parse the response for this metric
+		var metricResponse struct {
+			Status string `json:"status"`
+			Data   struct {
+				ResultType string `json:"resultType"`
+				Result     []struct {
+					Metric struct {
+						Name   string `json:"__name__"`
+						Test   string `json:"test"`
+						Unit   string `json:"unit"`
+						Branch string `json:"branch"`
+						Cloud  string `json:"cloud"`
+						Goos   string `json:"goos"`
+						Goarch string `json:"goarch"`
+						// Add any other labels you expect here
+					} `json:"metric"`
+					Values [][]interface{} `json:"values"` // [timestamp, value] pairs
+				} `json:"result"`
+			} `json:"data"`
+		}
+
+		if err := json.Unmarshal(data, &metricResponse); err != nil {
+			log.Printf("Error unmarshaling metric %s response: %v", metricName, err)
+			continue
+		}
+
+		if metricResponse.Status != "success" {
+			log.Printf("Unexpected status from VictoriaMetrics for metric %s: %s", metricName, metricResponse.Status)
+			continue
+		}
+
+		// Convert each result to BenchmarkJSON
+		for _, result := range metricResponse.Data.Result {
+			// Create a benchmark object for this result
+			unit := "ops/s" // default unit
+			if result.Metric.Unit != "" {
+				unit = result.Metric.Unit
+			}
+
+			// Create a unique name based on the metric and labels
+			name := result.Metric.Name
+			if result.Metric.Test != "" {
+				name = result.Metric.Test
+			}
+
+			// Create a BenchmarkJSON object
+			benchmark := &BenchmarkJSON{
+				Name:           name,
+				Unit:           unit,
+				HigherIsBetter: isHigherBetter(unit),
+				Values:         make([]ValueJSON, 0, len(result.Values)),
+			}
+
+			// Convert each value to ValueJSON
+			for _, v := range result.Values {
+				if len(v) != 2 {
+					continue // Skip invalid data points
+				}
+
+				// Extract timestamp and value
+				ts, ok := v[0].(float64)
+				if !ok {
+					continue
+				}
+
+				// Parse the value
+				var valStr string
+				switch val := v[1].(type) {
+				case string:
+					valStr = val
+				case float64:
+					valStr = fmt.Sprintf("%f", val)
+				default:
+					continue
+				}
+
+				value, err := strconv.ParseFloat(valStr, 64)
+				if err != nil {
+					continue
+				}
+
+				// Create a ValueJSON with confidence intervals
+				valueJSON := ValueJSON{
+					CommitDate:           time.Unix(int64(ts), 0),
+					CommitHash:           fmt.Sprintf("%d", int64(ts)), // Use timestamp as hash for now
+					BaselineCommitHash:   "baseline",
+					BenchmarksCommitHash: "benchmarks",
+					Low:                  value - 0.05, // Estimate confidence interval
+					Center:               value,
+					High:                 value + 0.05, // Estimate confidence interval
+				}
+
+				benchmark.Values = append(benchmark.Values, valueJSON)
+			}
+
+			// Sort values by commit date
+			sort.Slice(benchmark.Values, func(i, j int) bool {
+				return benchmark.Values[i].CommitDate.Before(benchmark.Values[j].CommitDate)
+			})
+
+			// Add to benchmark data if we have values
+			if len(benchmark.Values) > 0 {
+				benchmarkData = append(benchmarkData, benchmark)
+			}
+		}
+	}
+
+	if len(benchmarkData) == 0 {
+		log.Printf("No benchmark data found for test: %s", testName)
+		http.Error(w, fmt.Sprintf("No benchmark data found for test: %s", testName), http.StatusNotFound)
+		return
+	}
+
+	// Create commits from the benchmarks
+	commits := commitsFromBenchmarks(benchmarkData)
+
+	// Return the benchmark data as JSON
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(&SeriesDataJSON{Benchmarks: benchmarkData, Commits: commits}); err != nil {
+		log.Printf("Error encoding results: %v", err)
+		http.Error(w, "Internal error, see logs", 500)
+	}
+}
+
+// createBenchmarkComparisons creates benchmark comparisons between current data and baseline data
+func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselineMetrics map[string][]MetricPoint) ([]*BenchmarkJSON, error) {
+	if len(currentMetrics) == 0 {
+		return nil, fmt.Errorf("no current metrics available for comparison")
+	}
+
+	if len(baselineMetrics) == 0 {
+		return nil, fmt.Errorf("no baseline metrics available for comparison")
+	}
+
+	log.Printf("Creating benchmark comparisons between %d current metrics and %d baseline metrics",
+		len(currentMetrics), len(baselineMetrics))
+
+	// Find metrics that exist in both current and baseline
+	var benchmarks []*BenchmarkJSON
+	for metricKey, currentPoints := range currentMetrics {
+		baselinePoints, hasBaseline := baselineMetrics[metricKey]
+		if !hasBaseline || len(currentPoints) == 0 || len(baselinePoints) == 0 {
+			continue // Skip metrics without baseline data or points
+		}
+
+		// Ensure points are sorted
+		sort.Slice(currentPoints, func(i, j int) bool {
+			return currentPoints[i].Timestamp.Before(currentPoints[j].Timestamp)
+		})
+		sort.Slice(baselinePoints, func(i, j int) bool {
+			return baselinePoints[i].Timestamp.Before(baselinePoints[j].Timestamp)
+		})
+
+		// Calculate baseline average
+		var baselineSum float64
+		for _, point := range baselinePoints {
+			baselineSum += point.Value
+		}
+		baselineAvg := baselineSum / float64(len(baselinePoints))
+
+		// Create benchmark with comparisons
+		benchmark := &BenchmarkJSON{
+			Name:           currentPoints[0].Name,
+			Unit:           currentPoints[0].Unit,
+			HigherIsBetter: isHigherBetter(currentPoints[0].Unit),
+			Values:         make([]ValueJSON, 0, len(currentPoints)),
+		}
+
+		// Add comparison for each current point
+		for _, point := range currentPoints {
+			// Skip points with zero values (would cause division by zero)
+			if point.Value == 0 || baselineAvg == 0 {
+				continue
+			}
+
+			// Calculate ratio and add confidence interval
+			ratio := point.Value / baselineAvg
+
+			// Add the comparison value
+			benchmark.Values = append(benchmark.Values, ValueJSON{
+				CommitDate:           point.Timestamp,
+				CommitHash:           fmt.Sprintf("%d", point.Timestamp.Unix()),
+				BaselineCommitHash:   "baseline",
+				BenchmarksCommitHash: "benchmarks",
+				Low:                  ratio*0.95 - 1, // 5% confidence interval
+				Center:               ratio - 1,      // Convert from ratio to delta
+				High:                 ratio*1.05 - 1, // 5% confidence interval
+			})
+		}
+
+		// Add if we have values
+		if len(benchmark.Values) > 0 {
+			sort.Slice(benchmark.Values, func(i, j int) bool {
+				return benchmark.Values[i].CommitDate.Before(benchmark.Values[j].CommitDate)
+			})
+			benchmarks = append(benchmarks, benchmark)
+		}
+	}
+
+	log.Printf("Created %d benchmark comparisons", len(benchmarks))
+	return benchmarks, nil
+}
+
+// MetricPoint represents a single data point from a metric
+type MetricPoint struct {
+	Name      string
+	Unit      string
+	Labels    map[string]string
+	Value     float64
+	Timestamp time.Time
+}
+
+// convertVMDataToMetricPoints converts VictoriaMetrics data to a map of metric points
+func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) {
+	var response struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric struct {
+					Name   string `json:"__name__"`
+					Test   string `json:"test"`
+					Unit   string `json:"unit"`
+					Branch string `json:"branch"`
+					Cloud  string `json:"cloud"`
+					Goos   string `json:"goos"`
+					Goarch string `json:"goarch"`
+				} `json:"metric"`
+				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
+			} `json:"result"`
+		} `json:"data"`
+	}
+
+	// Log a preview of the response
+	if len(data) == 0 {
+		log.Printf("WARNING: Empty VictoriaMetrics response data")
+		return map[string][]MetricPoint{}, nil
+	}
+
+	if err := json.Unmarshal(data, &response); err != nil {
+		log.Printf("Error unmarshaling response: %v", err)
+		return nil, fmt.Errorf("error unmarshaling response: %w", err)
+	}
+
+	if response.Status != "success" {
+		log.Printf("Failed status from VictoriaMetrics: %s", response.Status)
+		return nil, fmt.Errorf("unexpected status: %s", response.Status)
+	}
+
+	log.Printf("Processing VictoriaMetrics response with %d result series", len(response.Data.Result))
+
+	if len(response.Data.Result) == 0 {
+		log.Printf("No results found in VictoriaMetrics response")
+		return map[string][]MetricPoint{}, nil
+	}
+
+	metrics := make(map[string][]MetricPoint)
+	totalPoints := 0
+
+	for _, result := range response.Data.Result {
+		// Extract test name and unit from metric
+		testName := result.Metric.Test
+		if testName == "" {
+			continue // Skip metrics without test name
+		}
+
+		unit := "ops/s" // default
+		if result.Metric.Unit != "" {
+			unit = result.Metric.Unit
+		}
+
+		metricKey := fmt.Sprintf("%s_%s", testName, unit)
+		points := make([]MetricPoint, 0, len(result.Values))
+
+		for _, v := range result.Values {
+			if len(v) != 2 {
+				continue // Skip invalid data points
+			}
+
+			// Extract timestamp and value
+			ts, ok := v[0].(float64)
+			if !ok {
+				continue
+			}
+
+			// Parse the value
+			var value float64
+			switch val := v[1].(type) {
+			case string:
+				parsedVal, err := strconv.ParseFloat(val, 64)
+				if err != nil {
+					continue
+				}
+				value = parsedVal
+			case float64:
+				value = val
+			default:
+				continue
+			}
+
+			// Create a MetricPoint
+			point := MetricPoint{
+				Name:      testName,
+				Unit:      unit,
+				Labels:    createLabelsMap(result.Metric), // Convert struct to map for compatibility
+				Value:     value,
+				Timestamp: time.Unix(int64(ts), 0),
+			}
+
+			points = append(points, point)
+			totalPoints++
+		}
+
+		if len(points) > 0 {
+			// Sort points by timestamp
+			sort.Slice(points, func(i, j int) bool {
+				return points[i].Timestamp.Before(points[j].Timestamp)
+			})
+
+			// Append to existing points or create new entry
+			if existingPoints, exists := metrics[metricKey]; exists {
+				// Merge the points
+				combinedPoints := append(existingPoints, points...)
+
+				// Re-sort the combined points
+				sort.Slice(combinedPoints, func(i, j int) bool {
+					return combinedPoints[i].Timestamp.Before(combinedPoints[j].Timestamp)
+				})
+
+				metrics[metricKey] = combinedPoints
+			} else {
+				metrics[metricKey] = points
+			}
+		}
+	}
+
+	log.Printf("Processed %d metrics with %d total data points", len(metrics), totalPoints)
+	return metrics, nil
+}
+
+// createLabelsMap converts a metric struct to a map of labels
+func createLabelsMap(metric struct {
+	Name   string `json:"__name__"`
+	Test   string `json:"test"`
+	Unit   string `json:"unit"`
+	Branch string `json:"branch"`
+	Cloud  string `json:"cloud"`
+	Goos   string `json:"goos"`
+	Goarch string `json:"goarch"`
+}) map[string]string {
+	labels := make(map[string]string)
+	labels["__name__"] = metric.Name
+	labels["test"] = metric.Test
+	labels["unit"] = metric.Unit
+	labels["branch"] = metric.Branch
+	labels["cloud"] = metric.Cloud
+	labels["goos"] = metric.Goos
+	labels["goarch"] = metric.Goarch
+	return labels
 }
