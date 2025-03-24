@@ -1,4 +1,4 @@
-// Copyright 2017 The Go Authors. All rights reserved.
+// Copyright 2022 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,27 +7,44 @@ package app
 
 import (
 	"net/http"
+	"os"
 )
 
-// App manages the analysis server logic.
-// Construct an App instance and call RegisterOnMux to connect it with an HTTP server.
+// App is the main application struct.
 type App struct {
-	// BaseDir is the directory containing the "template" directory.
-	// If empty, the current directory will be used.
-	BaseDir string
-
-	// VictoriaMetricsURL is the URL of the VictoriaMetrics server.
+	// VictoriaMetricsURL is the base URL for the VictoriaMetrics instance.
 	VictoriaMetricsURL string
 
-	// AuthCronEmail is the service account email which requests to
-	// /cron/syncinflux must contain an OICD authentication token for, with
-	// audience "/cron/syncinflux".
-	//
-	// If empty, no authentication is required.
+	// vmClient is the VictoriaMetrics client.
+	vmClient *VictoriaMetricsClient
+
+	// AuthCronEmail is the service account email for /cron/syncinflux authentication.
 	AuthCronEmail string
 }
 
-// RegisterOnMux registers the app's URLs on mux.
+// NewApp creates a new App instance.
+func NewApp() (*App, error) {
+	vmURL := os.Getenv("VICTORIA_METRICS_URL")
+	if vmURL == "" {
+		vmURL = "http://localhost:8428" // default VictoriaMetrics URL
+	}
+
+	app := &App{
+		VictoriaMetricsURL: vmURL,
+	}
+
+	// Initialize the VictoriaMetrics client
+	app.vmClient = NewVictoriaMetricsClient(app.VictoriaMetricsURL)
+
+	return app, nil
+}
+
+// RegisterOnMux registers all HTTP handlers on mux.
 func (a *App) RegisterOnMux(mux *http.ServeMux) {
 	a.dashboardRegisterOnMux(mux)
+}
+
+// Close cleans up any resources used by the App.
+func (a *App) Close() error {
+	return nil
 }

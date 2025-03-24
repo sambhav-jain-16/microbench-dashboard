@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -33,12 +34,36 @@ import (
 //go:embed dashboard/*
 var dashboardFS embed.FS
 
+// TestsJSON is the response for the tests.json endpoint
+type TestsJSON struct {
+	Tests []string `json:"tests"`
+}
+
 // dashboardRegisterOnMux registers the dashboard URLs on mux.
 func (a *App) dashboardRegisterOnMux(mux *http.ServeMux) {
-	mux.Handle("/dashboard/", http.FileServer(http.FS(dashboardFS)))
+	// Serve main.html as the default dashboard page
+	mux.HandleFunc("/dashboard/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dashboard/" {
+			// Serve main.html for the root dashboard path
+			data, err := dashboardFS.ReadFile("dashboard/main.html")
+			if err != nil {
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write(data)
+			return
+		}
+
+		// For all other paths, serve from the dashboard filesystem
+		http.FileServer(http.FS(dashboardFS)).ServeHTTP(w, r)
+	})
+
+	// Register other dashboard endpoints
 	mux.Handle("/dashboard/third_party/bandchart/", http.StripPrefix("/dashboard/third_party/bandchart/", http.FileServer(http.FS(bandchart.FS))))
 	mux.HandleFunc("/dashboard/data.json", a.dashboardData)
 	mux.HandleFunc("/dashboard/formfields.json", a.formFields)
+	mux.HandleFunc("/dashboard/tests.json", a.dashboardTests)
 }
 
 // DataJSON is the result of accessing the data.json endpoint.
@@ -726,4 +751,70 @@ func (a *App) formFields(w http.ResponseWriter, r *http.Request) {
 type FormFieldsJSON struct {
 	Branches            []string
 	LatestReleaseBranch string
+}
+
+// dashboardTests handles the tests.json endpoint
+func (a *App) dashboardTests(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Calculate the start time (1 year ago)
+	start := time.Now().Add(-365 * 24 * time.Hour)
+
+	// Construct the VictoriaMetrics query URL
+	url := fmt.Sprintf("%s/api/v1/label/test/values", a.VictoriaMetricsURL)
+
+	// Create the request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add query parameters
+	q := req.URL.Query()
+	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	req.URL.RawQuery = q.Encode()
+
+	// Make the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics: %v", err)
+		http.Error(w, "Error querying VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		http.Error(w, "Error reading response", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the response
+	var vmResponse struct {
+		Status string   `json:"status"`
+		Data   []string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &vmResponse); err != nil {
+		log.Printf("Error parsing response: %v", err)
+		http.Error(w, "Error parsing response", http.StatusInternalServerError)
+		return
+	}
+
+	if vmResponse.Status != "success" {
+		log.Printf("Unexpected status from VictoriaMetrics: %s", vmResponse.Status)
+		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the tests
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(TestsJSON{Tests: vmResponse.Data}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
 }

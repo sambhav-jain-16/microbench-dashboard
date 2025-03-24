@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Microbenchmark Dashboard - Test List</title>
+    <link rel="icon" href="https://www.cockroachlabs.com/favicon.ico"/>
+    <link rel="stylesheet" href="./static/style.css"/>
+    <style>
+        .test-list {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .test-list h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .test-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .test-card {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            transition: all 0.2s ease;
+        }
+        .test-card:hover {
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transform: translateY(-2px);
+        }
+        .test-card a {
+            color: #2c5282;
+            text-decoration: none;
+            font-size: 1.1em;
+        }
+        .test-card a:hover {
+            text-decoration: underline;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            font-size: 1.2em;
+            color: #666;
+        }
+        .error {
+            color: #e53e3e;
+            padding: 20px;
+            text-align: center;
+            background: #fff5f5;
+            border-radius: 4px;
+            margin: 20px auto;
+            max-width: 600px;
+        }
+    </style>
+</head>
+<body class="Dashboard">
+    <header class="Dashboard-topbar">
+        <h1>
+            <a href="/">CockroachDB Microbenchmark Dashboard</a>
+        </h1>
+    </header>
+
+    <div class="test-list">
+        <h1>Available Tests</h1>
+        <div id="test-grid" class="test-grid">
+            <div class="loading">Loading tests...</div>
+        </div>
+    </div>
+
+    <script>
+        async function fetchTests() {
+            try {
+                const response = await fetch('./tests.json');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch tests');
+                }
+                const data = await response.json();
+                return data.tests;
+            } catch (error) {
+                console.error('Error fetching tests:', error);
+                throw error;
+            }
+        }
+
+        function createTestCard(testName) {
+            const card = document.createElement('div');
+            card.className = 'test-card';
+            
+            const link = document.createElement('a');
+            link.href = `./?benchmark=${encodeURIComponent(testName)}`;
+            link.textContent = testName;
+            
+            card.appendChild(link);
+            return card;
+        }
+
+        function displayError(message) {
+            const grid = document.getElementById('test-grid');
+            grid.innerHTML = `
+                <div class="error">
+                    <p>Error: ${message}</p>
+                    <p>Please try refreshing the page or contact support if the problem persists.</p>
+                </div>
+            `;
+        }
+
+        // Initialize the page
+        fetchTests()
+            .then(tests => {
+                const grid = document.getElementById('test-grid');
+                grid.innerHTML = ''; // Clear loading message
+                
+                if (tests.length === 0) {
+                    grid.innerHTML = '<div class="error">No tests found</div>';
+                    return;
+                }
+
+                tests.forEach(test => {
+                    grid.appendChild(createTestCard(test));
+                });
+            })
+            .catch(error => {
+                displayError(error.message);
+            });
+    </script>
+</body>
+</html> 

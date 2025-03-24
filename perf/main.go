@@ -18,7 +18,6 @@ import (
 
 var (
 	victoriaMetricsURL = flag.String("victoriametrics-url", os.Getenv("VICTORIAMETRICS_URL"), "URL of the VictoriaMetrics server")
-	authCronEmail      = flag.String("auth-cron-email", "", "If set, requests to /cron/syncinflux must be authenticated as the passed service account.")
 )
 
 func main() {
@@ -27,7 +26,6 @@ func main() {
 
 	app := &app.App{
 		VictoriaMetricsURL: *victoriaMetricsURL,
-		AuthCronEmail:      *authCronEmail,
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", http.RedirectHandler("dashboard/", 307))
