@@ -500,13 +500,8 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 	benchmark := r.FormValue("benchmark")
 	unit := r.FormValue("unit")
-	var benchmarks []*BenchmarkJSON
 	var err error
-	var data []byte
-	var baselineData []byte
 
-	// Build the query string
-	var query string
 	// First, try to get the list of available metrics
 	metricsURL := fmt.Sprintf("%s/api/v1/series", a.VictoriaMetricsURL)
 	metricsReq, err := http.NewRequestWithContext(ctx, "GET", metricsURL, nil)
@@ -520,7 +515,7 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	if benchmark != "" {
 		// If we have a benchmark name, query for that specific test
 		q := metricsReq.URL.Query()
-		q.Add("match[]", fmt.Sprintf(`{test="%s"}`, benchmark))
+		q.Add("match[]", fmt.Sprintf(`{test="%s", unit!=""}`, benchmark))
 		q.Add("start", fmt.Sprintf("%d", start.Unix()))
 		q.Add("end", fmt.Sprintf("%d", end.Unix()))
 		metricsReq.URL.RawQuery = q.Encode()
@@ -561,104 +556,115 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 					if len(metricNames) > 0 {
 						log.Printf("Found metrics for test %s: %v", benchmark, metricNames)
 
-						// Use the first metric found for the specific test
-						if unit != "" {
-							// Specific benchmark and unit query
-							log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s, unit=%s",
-								metricNames[0], benchmark, cloud, branch, unit)
-							query = fmt.Sprintf(`%s{test="%s",cloud="%s",branch="%s",unit="%s"}`,
-								metricNames[0], benchmark, cloud, branch, unit)
-						} else {
-							// Query for all units of this test
-							var benchmarkFilter string
-							if benchmark != "" {
-								benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
+						// Process each metric individually
+						var allBenchmarks []*BenchmarkJSON
+						var allCommits []Commit
+						commitsMap := make(map[string]Commit) // To track unique commits
+
+						for _, metricName := range metricNames {
+							var metricQuery string
+							if unit != "" {
+								// Specific benchmark and unit query
+								log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s, unit=%s",
+									metricName, benchmark, cloud, branch, unit)
+								metricQuery = fmt.Sprintf(`%s{test="%s",cloud="%s",branch="%s",unit="%s"}`,
+									metricName, benchmark, cloud, branch, unit)
 							} else {
-								benchmarkFilter = ""
+								// Query for all units of this test
+								var benchmarkFilter string
+								if benchmark != "" {
+									benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
+								} else {
+									benchmarkFilter = ""
+								}
+
+								log.Printf("Querying for metric=%s, cloud=%s, branch=%s, test filter=%s",
+									metricName, cloud, branch, benchmarkFilter)
+								metricQuery = fmt.Sprintf(`%s{cloud="%s",branch="%s"%s,unit!=""}`,
+									metricName, cloud, branch, benchmarkFilter)
 							}
 
-							log.Printf("Querying for metric=%s, cloud=%s, branch=%s, test filter=%s",
-								metricNames[0], cloud, branch, benchmarkFilter)
-							query = fmt.Sprintf(`%s{cloud="%s",branch="%s"%s,unit!=""}`,
-								metricNames[0], cloud, branch, benchmarkFilter)
+							// Get data for this metric
+							metricData, err := vmClient.Query(ctx, metricQuery, start, end)
+							if err != nil {
+								log.Printf("Error querying metric %s: %v", metricName, err)
+								continue
+							}
+
+							// Get baseline data for this metric if needed
+							var metricBaselineData []byte
+							if baseline > 0 {
+								metricBaselineData, err = vmClient.Query(ctx, metricQuery, baselineStart, baselineEnd)
+								if err != nil {
+									log.Printf("Error querying baseline for metric %s: %v", metricName, err)
+									// Continue without baseline data
+								}
+							}
+
+							// Parse the response for this metric
+							metricBenchmarks, err := parseVictoriaMetricsResponse(metricData, baseline > 0, metricBaselineData)
+							if err != nil {
+								log.Printf("Error parsing response for metric %s: %v", metricName, err)
+								continue
+							}
+
+							if len(metricBenchmarks) > 0 {
+								log.Printf("Found %d benchmarks for metric %s", len(metricBenchmarks), metricName)
+
+								// Add benchmarks to the combined results
+								allBenchmarks = append(allBenchmarks, metricBenchmarks...)
+
+								// Add commits to the combined results
+								metricCommits := commitsFromBenchmarks(metricBenchmarks)
+								for _, commit := range metricCommits {
+									commitsMap[commit.Hash] = commit
+								}
+							} else {
+								log.Printf("No benchmarks found for metric %s", metricName)
+							}
 						}
+
+						// Convert commits map to slice
+						for _, commit := range commitsMap {
+							allCommits = append(allCommits, commit)
+						}
+
+						// Sort commits by date
+						sort.Slice(allCommits, func(i, j int) bool {
+							return allCommits[i].Date.Before(allCommits[j].Date)
+						})
+
+						if len(allBenchmarks) > 0 {
+							// Write the combined response
+							w.Header().Set("Content-Type", "application/json")
+
+							if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+								w.Header().Set("Content-Encoding", "gzip")
+								gz := gzip.NewWriter(w)
+								defer gz.Close()
+								w = &gzipResponseWriter{w: gz, ResponseWriter: w}
+							}
+
+							if err := json.NewEncoder(w).Encode(&DataJSON{Benchmarks: allBenchmarks, Commits: allCommits}); err != nil {
+								log.Printf("Error encoding results: %v", err)
+								http.Error(w, "Internal error, see logs", 500)
+							}
+							return
+						}
+
+						// If we get here, it means we either didn't find any metrics or none of the metrics had data
+						log.Printf("No benchmarks found for test: %s", benchmark)
+						http.Error(w, "No benchmarks found", 404)
+						return
 					}
 				}
 			}
 		}
 	}
 
-	// If we couldn't determine a specific metric, fall back to a generic query
-	if query == "" {
-		if unit != "" {
-			// Fetch a single and specific benchmark
-			log.Printf("Querying for test=%s, cloud=%s, branch=%s, unit=%s (no specific metric)",
-				benchmark, cloud, branch, unit)
-			query = fmt.Sprintf(`{test="%s",cloud="%s",branch="%s",unit="%s"}`,
-				benchmark, cloud, branch, unit)
-		} else {
-			// Fetch all benchmarks matching the criteria
-			// Use regexp matching for benchmark name, ensure unit is not empty
-			var benchmarkFilter string
-			if benchmark != "" {
-				benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
-			} else {
-				benchmarkFilter = ""
-			}
-
-			log.Printf("Querying for cloud=%s, branch=%s, test filter=%s (no specific metric)",
-				cloud, branch, benchmarkFilter)
-			query = fmt.Sprintf(`{cloud="%s",branch="%s"%s,unit!=""}`,
-				cloud, branch, benchmarkFilter)
-		}
-	}
-
-	// Get current data
-	data, err = vmClient.Query(ctx, query, start, end)
-	if err != nil {
-		log.Printf("Error querying VictoriaMetrics: %v", err)
-		http.Error(w, "Error querying VictoriaMetrics", 500)
-		return
-	}
-
-	// Get baseline data if requested
-	if baseline > 0 {
-		baselineData, err = vmClient.Query(ctx, query, baselineStart, baselineEnd)
-		if err != nil {
-			log.Printf("Error querying VictoriaMetrics for baseline: %v", err)
-			http.Error(w, "Error querying VictoriaMetrics for baseline data", 500)
-			return
-		}
-	}
-
-	// Parse the main response and convert to BenchmarkJSON
-	benchmarks, err = parseVictoriaMetricsResponse(data, baseline > 0, baselineData)
-	if err != nil {
-		log.Printf("Error parsing VictoriaMetrics response: %v", err)
-		http.Error(w, "Error parsing VictoriaMetrics response: "+err.Error(), 500)
-		return
-	}
-
-	if len(benchmarks) == 0 {
-		log.Printf("No benchmarks found matching criteria")
-		http.Error(w, "No benchmarks found", 404)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-		w.Header().Set("Content-Encoding", "gzip")
-		gz := gzip.NewWriter(w)
-		defer gz.Close()
-		w = &gzipResponseWriter{w: gz, ResponseWriter: w}
-	}
-
-	commits := commitsFromBenchmarks(benchmarks)
-	if err := json.NewEncoder(w).Encode(&DataJSON{Benchmarks: benchmarks, Commits: commits}); err != nil {
-		log.Printf("Error encoding results: %v", err)
-		http.Error(w, "Internal error, see logs", 500)
-	}
+	// If we get here, it means we either didn't find any metrics or none of the metrics had data
+	log.Printf("No benchmarks found for test: %s", benchmark)
+	http.Error(w, "No benchmarks found", 404)
 }
 
 // parseVictoriaMetricsResponse parses the VictoriaMetrics response into BenchmarkJSON format

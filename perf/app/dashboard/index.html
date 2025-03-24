@@ -216,7 +216,7 @@ function addCharts(benchmarks, repository, commits) {
 		}
 
 		// Create chart title with baseline indicator
-		const chartTitle = hasBaseline ? `${bench.Unit} (% change from baseline)` : bench.Unit;
+		const chartTitle = bench.Unit;
 
 		item.appendChild(BandChart(bench.Values, {
 			benchmark: bench.Name,
@@ -245,37 +245,24 @@ function idToCommit(id) {
 	return null;
 }
 
-function addTable(bench, unit, cloudProvider, commits) {
+function addTable(bench, unit, repository, commits) {
 	let commitSelected = idToCommit(window.location.hash.slice(1));
 	let dashboard = document.getElementById("dashboard");
 
 	removeLoadingMessage();
-
-	// Check if baseline comparison is active
-	const urlParams = new URLSearchParams(window.location.search);
-	const hasBaseline = urlParams.has('baseline') && urlParams.get('baseline') !== "0";
-	const baselineValue = urlParams.get('baseline');
 
 	let section = document.createElement("grid");
 	section.classList.add("Dashboard-section");
 	section.classList.add("Dashboard-section-expand");
 	dashboard.appendChild(section);
 
-	let link = document.createElement("a");
-	link.href = "?benchmark=" + bench.Name + "&unit=" + unit;
-	let title = bench.Name + " (" + unit + ")";
-	
-	// Add baseline indicator if applicable
-	if (hasBaseline) {
-		title += ` - ${baselineValue}-day baseline comparison`;
-	}
-	
-	link.textContent = title;
+	let link = document.createElement("h2");
+	link.textContent = bench.Name + " (" + unit + ")";
 
-	let titleElem = document.createElement("h2");
-	titleElem.classList.add("Dashboard-title");
-	titleElem.appendChild(link);
-	section.appendChild(titleElem);
+	let title = document.createElement("h2");
+	title.classList.add("Dashboard-title");
+	title.appendChild(link);
+	section.appendChild(title);
 
 	const table = document.createElement("table");
 	table.classList.add("Dashboard-table");
@@ -305,14 +292,7 @@ function addTable(bench, unit, cloudProvider, commits) {
 	const header = document.createElement("tr");
 	header.appendChild(createCell("Date", true));
 	header.appendChild(createCell("Experiment commit", true));
-	
-	// Change column header based on baseline mode
-	if (hasBaseline) {
-		header.appendChild(createCell("% Change from baseline", true));
-	} else {
-		header.appendChild(createCell("Delta", true));
-	}
-	
+	header.appendChild(createCell("Delta", true));
 	header.appendChild(createCell("Baseline commit", true));
 	header.appendChild(createCell("runner commit", true));
 	table.appendChild(header);
@@ -365,42 +345,24 @@ function addTable(bench, unit, cloudProvider, commits) {
 		}).format(c.Date), false));
 
 		// Commit hash.
-		const commitCell = createCommitCell(c.Hash, cloudProvider);
+		const commitCell = createCommitCell(c.Hash, repository);
 		commitCell.id = commitToId(c.Hash);
 		row.appendChild(commitCell);
 
 		if (valuesByCommit.has(c.Hash)) {
 			const v = valuesByCommit.get(c.Hash);
 
-			// Range visualization - adjust display for baseline mode
+			// Range visualization.
 			const range = createCell("", false);
-			if (hasBaseline) {
-				// For baseline comparison, format as percentage
-				// Add a special class to style percentage changes
-				const changeClass = v.Center > 0 ? "regression" : (v.Center < 0 ? "improvement" : "");
-				const percentChange = document.createElement("div");
-				percentChange.classList.add("percent-change");
-				if (changeClass) {
-					percentChange.classList.add(changeClass);
-				}
-				
-				// Format the percentage value
-				const formattedValue = (v.Center * 100).toFixed(2) + "%";
-				percentChange.textContent = formattedValue;
-				
-				range.appendChild(percentChange);
-			} else {
-				// Normal range visualization
-				range.appendChild(Range(v.Low, v.Center, v.High, min, max, 640, 48, bench.Unit, bench.HigherIsBetter));
-			}
+			range.appendChild(Range(v.Low, v.Center, v.High, min, max, 640, 48, bench.Unit, bench.HigherIsBetter));
 			range.classList.add("Dashboard-table-range")
 			row.appendChild(range);
 
 			// Baseline commit hash.
-			row.appendChild(createCommitCell(v.BaselineCommitHash, cloudProvider));
+			row.appendChild(createCommitCell(v.BaselineCommitHash, repository));
 
 			// Runner commit hash (named Benchmarks commit internally / in influx).
-			row.appendChild(createCommitCell(v.BenchmarksCommitHash, cloudProvider));
+			row.appendChild(createCommitCell(v.BenchmarksCommitHash, repository));
 		} else {
 			// Row without info.
 			const range = createCell("", false);
