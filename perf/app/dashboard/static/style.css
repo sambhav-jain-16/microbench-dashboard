@@ -188,16 +188,10 @@ input[type=number] {
   border: 1px solid #ddd;
   border-radius: 4px;
   overflow: hidden;
-}
-.Dashboard-table-commit {
-  font-family: monospace;
-  white-space: nowrap;
-}
-.Dashboard-table-range {
-  padding: 10px 0;
+  font-size: 14px;
 }
 .Dashboard-table th {
-  text-align: left;
+  text-align: center;
   padding: 15px 12px;
   background-color: #e0ebf5;
   color: #375eab;
@@ -206,9 +200,28 @@ input[type=number] {
   font-weight: bold;
 }
 .Dashboard-table td {
-  padding: 15px 12px;
-  border-bottom: 1px solid #ddd;
+  padding: 0.5em;
+  border-bottom: 1px solid #eee;
   vertical-align: middle;
+}
+.Dashboard-table tr:hover {
+  background-color: #fff59d !important; /* More vibrant yellow for hover */
+}
+.Dashboard-table tr.selected {
+  background-color: #ffeb3b !important; /* Brighter yellow for selected rows */
+}
+.Dashboard-table-range {
+  width: 600px;
+}
+.Dashboard-table-commit {
+  width: 100px;
+}
+.Dashboard-table-commit {
+  font-family: monospace;
+  white-space: nowrap;
+}
+.Dashboard-table-range {
+  padding: 10px 0;
 }
 .Dashboard-table td:first-child {
   white-space: nowrap;
@@ -222,10 +235,10 @@ input[type=number] {
   background-color: #f8f8f8;
 }
 .Dashboard-table tr:hover {
-  background-color: #f0f7ff;
+  background-color: #fff59d !important; /* More vibrant yellow for hover */
 }
 .Dashboard-table tr.selected {
-  background-color: #e0ebf5;
+  background-color: #ffeb3b !important; /* Brighter yellow for selected rows */
 }
 .Dashboard-table .grafana-link {
   text-align: center;

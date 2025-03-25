@@ -651,6 +651,21 @@ function addTable(bench, unit, repository, commits) {
 
 		// Add row to table
 		table.appendChild(row);
+		
+		// Add click handler to highlight the selected row
+		row.addEventListener('click', function() {
+			// Remove selected class from all rows
+			const rows = table.querySelectorAll('tr');
+			rows.forEach(r => r.classList.remove('selected'));
+			
+			// Add selected class to this row
+			this.classList.add('selected');
+			
+			// Update URL hash to reflect selection
+			if (dateCell.id) {
+				window.location.hash = dateCell.id;
+			}
+		});
 	}
 
 	if (commitSelected) {
@@ -658,9 +673,19 @@ function addTable(bench, unit, repository, commits) {
 		// right one. The browser won't do this automatically because the anchors
 		// don't exist when the page is loaded.
 		const anchor = document.querySelector("#" + commitToId(commitSelected));
-		window.scrollTo({
-			top: anchor.getBoundingClientRect().top + window.pageYOffset - 20,
-		})
+		if (anchor) {
+			// Highlight the selected row
+			let row = anchor.closest('tr');
+			if (row) {
+				row.classList.add('selected');
+			}
+			
+			// Scroll to the selected row
+			window.scrollTo({
+				top: anchor.getBoundingClientRect().top + window.pageYOffset - 20,
+				behavior: 'smooth'
+			});
+		}
 	}
 }
 
