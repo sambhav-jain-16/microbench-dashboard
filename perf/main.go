@@ -18,6 +18,7 @@ import (
 
 var (
 	victoriaMetricsURL = flag.String("victoriametrics-url", os.Getenv("VICTORIAMETRICS_URL"), "URL of the VictoriaMetrics server")
+	grafanaURL         = flag.String("grafana-url", os.Getenv("GRAFANA_URL"), "URL of the Grafana server")
 )
 
 func main() {
@@ -26,6 +27,7 @@ func main() {
 
 	app := &app.App{
 		VictoriaMetricsURL: *victoriaMetricsURL,
+		GrafanaURL:         *grafanaURL,
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", http.RedirectHandler("dashboard/", 307))

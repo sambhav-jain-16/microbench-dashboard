@@ -94,6 +94,7 @@ type ValueJSON struct {
 	CommitHash           string
 	CommitDate           time.Time
 	BaselineCommitHash   string
+	BaselineCommitDate   time.Time
 	BenchmarksCommitHash string
 
 	// These are pre-formatted as percent change.
@@ -137,6 +138,7 @@ func fluxRecordToValue(rec *query.FluxRecord) (ValueJSON, error) {
 		CommitDate:           rec.Time(),
 		CommitHash:           commit,
 		BaselineCommitHash:   baselineCommit,
+		BaselineCommitDate:   rec.Time(),
 		BenchmarksCommitHash: benchmarksCommit,
 		Low:                  low - 1,
 		Center:               center - 1,
@@ -872,6 +874,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 							CommitDate:           time.Unix(int64(ts), 0),
 							CommitHash:           fmt.Sprintf("%d", int64(ts)),
 							BaselineCommitHash:   "baseline",
+							BaselineCommitDate:   time.Unix(int64(ts), 0),
 							BenchmarksCommitHash: "benchmarks",
 							Low:                  value - 0.05,
 							Center:               value,
@@ -976,6 +979,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 				CommitDate:           time.Unix(int64(ts), 0),
 				CommitHash:           fmt.Sprintf("%d", int64(ts)), // Use timestamp as hash for now
 				BaselineCommitHash:   "baseline",
+				BaselineCommitDate:   time.Unix(int64(ts), 0),
 				BenchmarksCommitHash: "benchmarks",
 				Low:                  value - 0.05, // Estimate confidence interval
 				Center:               value,
@@ -1068,6 +1072,7 @@ func (a *App) formFields(w http.ResponseWriter, r *http.Request) {
 	resp := FormFieldsJSON{
 		Branches:            []string{"master"},
 		LatestReleaseBranch: "",
+		GrafanaURL:          a.GrafanaURL,
 	}
 
 	// Encode and write the response.
@@ -1081,6 +1086,7 @@ func (a *App) formFields(w http.ResponseWriter, r *http.Request) {
 type FormFieldsJSON struct {
 	Branches            []string
 	LatestReleaseBranch string
+	GrafanaURL          string
 }
 
 // dashboardTests handles the tests.json endpoint
@@ -1583,6 +1589,7 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 					CommitDate:           time.Unix(int64(ts), 0),
 					CommitHash:           fmt.Sprintf("%d", int64(ts)), // Use timestamp as hash for now
 					BaselineCommitHash:   "baseline",
+					BaselineCommitDate:   time.Unix(int64(ts), 0),
 					BenchmarksCommitHash: "benchmarks",
 					Low:                  value - 0.05, // Estimate confidence interval
 					Center:               value,
@@ -1680,6 +1687,7 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 				CommitDate:           point.Timestamp,
 				CommitHash:           fmt.Sprintf("%d", point.Timestamp.Unix()),
 				BaselineCommitHash:   "baseline",
+				BaselineCommitDate:   point.Timestamp,
 				BenchmarksCommitHash: "benchmarks",
 				Low:                  ratio*0.95 - 1, // 5% confidence interval
 				Center:               ratio - 1,      // Convert from ratio to delta

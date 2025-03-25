@@ -383,6 +383,8 @@ function addTable(bench, unit, repository, commits) {
 	let dashboard = document.getElementById("dashboard");
 
 	removeLoadingMessage();
+	
+	console.log("Adding table for benchmark:", bench.Name, "with", bench.Values.length, "values and", commits.length, "commits");
 
 	let section = document.createElement("grid");
 	section.classList.add("Dashboard-section");
@@ -421,49 +423,144 @@ function addTable(bench, unit, repository, commits) {
 		return commitHash;
 	}
 
+	// Create Grafana comparison link
+	const createGrafanaLink = function(testName, timestamp) {
+		const grafanaCell = createCell("", false);
+		grafanaCell.classList.add("grafana-link");
+		
+		if (!window.grafanaURL) {
+			grafanaCell.textContent = "Grafana URL not configured";
+			grafanaCell.title = "Configure the server with --grafana-url flag";
+			return grafanaCell;
+		}
+
+		const link = document.createElement("a");
+
+		// Get baseline days from URL parameter or use default
+		const urlParams = new URLSearchParams(window.location.search);
+		const baselineDays = parseInt(urlParams.get('baseline') || '45', 10);
+		
+		// Calculate baseline timestamp (default to 45 days before current timestamp)
+		const baselineDate = new Date(timestamp.getTime() - baselineDays * 24 * 60 * 60 * 1000);
+		
+		const from = Math.floor(baselineDate.getTime());
+		const to = Math.floor(timestamp.getTime());
+		
+		// Create URL with appropriate parameters for side-by-side comparison
+		const params = new URLSearchParams();
+		params.set("orgId", "1");
+		params.set("from", from);
+		params.set("to", to);
+		params.set("var-test", testName);
+		params.set("var-benchmark", testName); // Add both as some dashboards might use either
+		params.set("var-cloud", cloudProvider); // Add cloud provider
+		
+		// Create formatted dates for link text
+		const currentDateStr = Intl.DateTimeFormat([], {
+			month: 'short',
+			day: 'numeric'
+		}).format(timestamp);
+		const baselineDateStr = Intl.DateTimeFormat([], {
+			month: 'short',
+			day: 'numeric'
+		}).format(baselineDate);
+		
+		// Construct the URL (this will need to be customized based on your Grafana setup)
+		link.href = `${window.grafanaURL}/d/benchmark-comparison/cockroach-benchmark-comparison?${params.toString()}`;
+		link.textContent = `Compare ${baselineDateStr} vs ${currentDateStr}`;
+		link.title = "Compare this benchmark in Grafana with detailed metrics";
+		link.target = "_blank";  // Open in new tab
+		
+		grafanaCell.appendChild(link);
+		return grafanaCell;
+	}
+
 	// Create the header.
 	const header = document.createElement("tr");
 	header.appendChild(createCell("Date", true));
-	header.appendChild(createCell("Experiment commit", true));
 	header.appendChild(createCell("Delta", true));
-	header.appendChild(createCell("Baseline commit", true));
-	header.appendChild(createCell("runner commit", true));
+	header.appendChild(createCell("Grafana Comparison", true));
 	table.appendChild(header);
 
 	// Find the min and max.
-	let min = bench.Values[0].Low;
-	let max = bench.Values[0].High;
-	for (let i = 1; i < bench.Values.length; i++) {
-		if (bench.Values[i].Low < min) {
-			min = bench.Values[i].Low;
+	let min = Number.POSITIVE_INFINITY;
+	let max = Number.NEGATIVE_INFINITY;
+	
+	for (let i = 0; i < bench.Values.length; i++) {
+		const v = bench.Values[i];
+		if (v.Low < min) {
+			min = v.Low;
 		}
-		if (bench.Values[i].High > max) {
-			max = bench.Values[i].High;
+		if (v.High > max) {
+			max = v.High;
 		}
+	}
+	
+	console.log("Min and max values:", min, max);
+	
+	// If we somehow didn't find any valid min/max values, set defaults
+	if (min === Number.POSITIVE_INFINITY || max === Number.NEGATIVE_INFINITY) {
+		console.warn("Invalid min/max values, using defaults");
+		min = -0.1;
+		max = 0.1;
 	}
 
 	// Clamp for presentation.
+	console.log("Before clamping, min/max:", min, max);
+	
 	if (min < 0 && min > -minViewDeltaPercent) {
-		min = -minViewDeltaPercent
+		min = -minViewDeltaPercent;
 	}
 	if (max > 0 && max < minViewDeltaPercent) {
-		max = minViewDeltaPercent
+		max = minViewDeltaPercent;
 	}
 	if (max-min < 2*minViewDeltaPercent) {
 		const amt = (2*minViewDeltaPercent-(max-min))/2;
 		max += amt;
 		min -= amt;
 	}
+	
+	// Ensure we don't have NaN values after clamping
+	if (isNaN(min) || isNaN(max)) {
+		console.error("NaN values after clamping, using defaults");
+		min = -minViewDeltaPercent;
+		max = minViewDeltaPercent;
+	}
+	
+	console.log("After clamping, min/max:", min, max);
 
 	// Create a map of hashes to values.
-	let valuesByCommit = new Map();
+	let valuesByCommit = {};
 	for (let i = 0; i < bench.Values.length; i++) {
-		valuesByCommit.set(bench.Values[i].CommitHash, bench.Values[i])
+		const val = bench.Values[i];
+		if (!valuesByCommit[val.CommitHash]) {
+			valuesByCommit[val.CommitHash] = [];
+		}
+		valuesByCommit[val.CommitHash].push(val);
 	}
+	
+	console.log("valuesByCommit structure:", Object.keys(valuesByCommit).length, "commit hashes found");
+	if (Object.keys(valuesByCommit).length === 0) {
+		console.warn("No commits found in valuesByCommit map!");
+	} else {
+		// Log a sample of the first commit's values
+		const sampleCommit = Object.keys(valuesByCommit)[0];
+		console.log("Sample commit", sampleCommit, "has", valuesByCommit[sampleCommit].length, "values");
+		console.log("Sample value:", valuesByCommit[sampleCommit][0]);
+	}
+	
+	// Check for mismatched commit hashes
+	const commitHashesInData = new Set(Object.keys(valuesByCommit));
+	const commitHashesInCommits = new Set(commits.map(c => c.Hash));
+	console.log("Commits in data but not in commits array:", 
+		[...commitHashesInData].filter(hash => !commitHashesInCommits.has(hash)).length);
+	console.log("Commits in commits array but not in data:", 
+		[...commitHashesInCommits].filter(hash => !commitHashesInData.has(hash)).length);
 
 	// Iterate backwards, showing the most recent first.
 	for (let i = commits.length-1; i >= 0; i--) {
 		const c = commits[i];
+		console.log("Processing commit:", c.Hash, "date:", c.Date);
 
 		// Create a row per value.
 		const row = document.createElement("tr");
@@ -471,47 +568,88 @@ function addTable(bench, unit, repository, commits) {
 			row.classList.add("selected");
 		}
 
-		// Commit date.
-		row.appendChild(createCell(Intl.DateTimeFormat([], {
+		// Date cell
+		const dateCell = createCell(Intl.DateTimeFormat([], {
 			dateStyle: "long",
 			timeStyle: "short",
-		}).format(c.Date), false));
+		}).format(c.Date), false);
+		dateCell.id = commitToId(c.Hash);
+		row.appendChild(dateCell);
 
-		// Commit hash.
-		const commitCell = createCommitCell(c.Hash, repository);
-		commitCell.id = commitToId(c.Hash);
-		row.appendChild(commitCell);
+		if (valuesByCommit[c.Hash]) {
+			console.log("Found value for commit:", c.Hash);
+			const values = valuesByCommit[c.Hash];
+			
+			// Use the first value in the array if multiple exist
+			const v = Array.isArray(values) ? values[0] : values;
+			console.log("Using value:", v);
 
-		if (valuesByCommit.has(c.Hash)) {
-			const v = valuesByCommit.get(c.Hash);
-
-			// Range visualization.
+			// Delta cell
 			const range = createCell("", false);
-			range.appendChild(Range(v.Low, v.Center, v.High, min, max, 640, 48, bench.Unit, bench.HigherIsBetter));
-			range.classList.add("Dashboard-table-range")
-			row.appendChild(range);
-
-			// Baseline commit hash.
-			row.appendChild(createCommitCell(v.BaselineCommitHash, repository));
-
-			// Runner commit hash (named Benchmarks commit internally / in influx).
-			row.appendChild(createCommitCell(v.BenchmarksCommitHash, repository));
-		} else {
-			// Row without info.
-			const range = createCell("", false);
-			range.appendChild(NoDataRange(min, max, 640, 48));
+			try {
+				// Validate the values before creating range
+				if (v && typeof v.Low === 'number' && typeof v.Center === 'number' && typeof v.High === 'number') {
+					const rangeElement = Range(v.Low, v.Center, v.High, min, max, 600, 48, bench.Unit, bench.HigherIsBetter);
+					if (rangeElement) {
+						range.appendChild(rangeElement);
+					} else {
+						// Fallback if Range function fails
+						console.warn("Range function returned null, using fallback");
+						range.textContent = `${(v.Center * 100).toFixed(2)}% (${(v.Low * 100).toFixed(2)}% to ${(v.High * 100).toFixed(2)}%)`;
+					}
+				} else {
+					// Value is invalid
+					console.error("Invalid value object for Range:", v);
+					range.textContent = "Invalid data";
+				}
+			} catch (e) {
+				console.error("Error creating range visualization:", e);
+				range.textContent = v && typeof v.Center === 'number' ? 
+					`${(v.Center * 100).toFixed(2)}% (${(v.Low * 100).toFixed(2)}% to ${(v.High * 100).toFixed(2)}%)` : 
+					"Error displaying value";
+			}
 			range.classList.add("Dashboard-table-range");
 			row.appendChild(range);
 
-			const baselineNA = createCell("N/A", false);
-			baselineNA.classList.add("Dashboard-table-commit");
-			row.appendChild(baselineNA);
+			// Grafana link cell
+			const grafanaCell = createGrafanaLink(bench.Name, c.Date);
+			row.appendChild(grafanaCell);
+		} else {
+			console.log("No value found for commit:", c.Hash);
+			
+			// Empty delta cell
+			const range = createCell("", false);
+			try {
+				console.log("Creating NoDataRange with min, max:", min, max);
+				
+				// Validate min and max before creating range
+				if (typeof min === 'number' && typeof max === 'number' && !isNaN(min) && !isNaN(max)) {
+					const noDataElement = NoDataRange(min, max, 600, 48);
+					if (noDataElement) {
+						range.appendChild(noDataElement);
+					} else {
+						// Fallback if NoDataRange function fails
+						console.warn("NoDataRange function returned null, using fallback");
+						range.textContent = "No data available";
+					}
+				} else {
+					// Invalid min/max
+					console.error("Invalid min/max for NoDataRange:", min, max);
+					range.textContent = "No data available";
+				}
+			} catch (e) {
+				console.error("Error creating no-data visualization:", e);
+				range.textContent = "No data available";
+			}
+			range.classList.add("Dashboard-table-range");
+			row.appendChild(range);
 
-			const benchmarksNA = createCell("N/A", false);
-			benchmarksNA.classList.add("Dashboard-table-commit");
-			row.appendChild(benchmarksNA);
+			// Grafana link cell
+			const grafanaCell = createGrafanaLink(bench.Name, c.Date);
+			row.appendChild(grafanaCell);
 		}
 
+		// Add row to table
 		table.appendChild(row);
 	}
 
@@ -549,6 +687,9 @@ let now = new Date();
 // Fill search boxes from query params.
 function prefillSearch(formFields) {
 	let params = new URLSearchParams(window.location.search);
+
+	// Store Grafana URL globally for use in table creation
+	window.grafanaURL = formFields.GrafanaURL || '';
 
 	let benchmark = params.get('benchmark');
 	if (benchmark) {

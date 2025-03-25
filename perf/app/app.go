@@ -15,6 +15,9 @@ type App struct {
 	// VictoriaMetricsURL is the base URL for the VictoriaMetrics instance.
 	VictoriaMetricsURL string
 
+	// GrafanaURL is the base URL for the Grafana instance
+	GrafanaURL string
+
 	// vmClient is the VictoriaMetrics client.
 	vmClient *VictoriaMetricsClient
 
