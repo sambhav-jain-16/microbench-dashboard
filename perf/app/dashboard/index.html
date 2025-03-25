@@ -191,7 +191,7 @@ license that can be found in the LICENSE file.
 							<div class="Dashboard-baseline">
 								<input id="baseline-input" type="number" name="baseline" value="45" />
 							</div>
-							End (UTC): <input id="end-input" type="datetime-local" name="end" />
+							End (UTC): <input id="end-input" type="date" name="end" />
 							<input type="submit">
 						</li>
 					</ul>
@@ -534,9 +534,12 @@ function addTable(bench, unit, repository, commits) {
 	for (let i = 0; i < bench.Values.length; i++) {
 		const val = bench.Values[i];
 		if (!valuesByCommit[val.CommitHash]) {
-			valuesByCommit[val.CommitHash] = [];
+			valuesByCommit[val.CommitHash] = val;
+		} else {
+			// If we already have a value for this commit hash, 
+			// log it but don't add a duplicate entry
+			console.log("Skipping duplicate value for commit:", val.CommitHash);
 		}
-		valuesByCommit[val.CommitHash].push(val);
 	}
 	
 	console.log("valuesByCommit structure:", Object.keys(valuesByCommit).length, "commit hashes found");
@@ -545,8 +548,8 @@ function addTable(bench, unit, repository, commits) {
 	} else {
 		// Log a sample of the first commit's values
 		const sampleCommit = Object.keys(valuesByCommit)[0];
-		console.log("Sample commit", sampleCommit, "has", valuesByCommit[sampleCommit].length, "values");
-		console.log("Sample value:", valuesByCommit[sampleCommit][0]);
+		console.log("Sample commit", sampleCommit);
+		console.log("Sample value:", valuesByCommit[sampleCommit]);
 	}
 	
 	// Check for mismatched commit hashes
@@ -571,17 +574,13 @@ function addTable(bench, unit, repository, commits) {
 		// Date cell
 		const dateCell = createCell(Intl.DateTimeFormat([], {
 			dateStyle: "long",
-			timeStyle: "short",
 		}).format(c.Date), false);
 		dateCell.id = commitToId(c.Hash);
 		row.appendChild(dateCell);
 
 		if (valuesByCommit[c.Hash]) {
 			console.log("Found value for commit:", c.Hash);
-			const values = valuesByCommit[c.Hash];
-			
-			// Use the first value in the array if multiple exist
-			const v = Array.isArray(values) ? values[0] : values;
+			const v = valuesByCommit[c.Hash];
 			console.log("Using value:", v);
 
 			// Delta cell

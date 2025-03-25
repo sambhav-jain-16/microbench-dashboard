@@ -443,11 +443,15 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	endParam := r.FormValue("end")
 	if endParam != "" {
 		var err error
-		end, err = time.Parse("2006-01-02T15:04", endParam)
+		end, err = time.Parse("2006-01-02", endParam)
 		if err != nil {
-			log.Printf("Error parsing end %q: %v", endParam, err)
-			http.Error(w, "end parameter must be a timestamp similar to RFC3339 without a time zone, like 2000-12-31T15:00", http.StatusBadRequest)
-			return
+			// For backward compatibility, try the old format as well
+			end, err = time.Parse("2006-01-02T15:04", endParam)
+			if err != nil {
+				log.Printf("Error parsing end %q: %v", endParam, err)
+				http.Error(w, "end parameter must be a date (YYYY-MM-DD)", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
@@ -1413,11 +1417,15 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 	endParam := r.FormValue("end")
 	if endParam != "" {
 		var err error
-		end, err = time.Parse("2006-01-02T15:04", endParam)
+		end, err = time.Parse("2006-01-02", endParam)
 		if err != nil {
-			log.Printf("Error parsing end %q: %v", endParam, err)
-			http.Error(w, "end parameter must be a timestamp similar to RFC3339 without a time zone, like 2000-12-31T15:00", http.StatusBadRequest)
-			return
+			// For backward compatibility, try the old format as well
+			end, err = time.Parse("2006-01-02T15:04", endParam)
+			if err != nil {
+				log.Printf("Error parsing end %q: %v", endParam, err)
+				http.Error(w, "end parameter must be a date (YYYY-MM-DD)", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
@@ -1672,6 +1680,9 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			Values:         make([]ValueJSON, 0, len(currentPoints)),
 		}
 
+		// Use a map to ensure only one value per day (using day as key)
+		dayValuesMap := make(map[string]ValueJSON)
+
 		// Add comparison for each current point
 		for _, point := range currentPoints {
 			// Skip points with zero values (would cause division by zero)
@@ -1682,8 +1693,8 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			// Calculate ratio and add confidence interval
 			ratio := point.Value / baselineAvg
 
-			// Add the comparison value
-			benchmark.Values = append(benchmark.Values, ValueJSON{
+			// Create the value
+			value := ValueJSON{
 				CommitDate:           point.Timestamp,
 				CommitHash:           fmt.Sprintf("%d", point.Timestamp.Unix()),
 				BaselineCommitHash:   "baseline",
@@ -1692,7 +1703,22 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 				Low:                  ratio*0.95 - 1, // 5% confidence interval
 				Center:               ratio - 1,      // Convert from ratio to delta
 				High:                 ratio*1.05 - 1, // 5% confidence interval
-			})
+			}
+
+			// Use day as the key to avoid duplicates
+			dayKey := point.Timestamp.Format("2006-01-02")
+
+			// Only add if we don't already have a value for this day or if this value
+			// is later in the day than the one we already have
+			if existingValue, exists := dayValuesMap[dayKey]; !exists ||
+				point.Timestamp.After(existingValue.CommitDate) {
+				dayValuesMap[dayKey] = value
+			}
+		}
+
+		// Convert map to slice
+		for _, value := range dayValuesMap {
+			benchmark.Values = append(benchmark.Values, value)
 		}
 
 		// Add if we have values

@@ -42,7 +42,7 @@ func (c *VictoriaMetricsClient) Query(ctx context.Context, query string, start, 
 	q.Add("query", query)
 	q.Add("start", fmt.Sprintf("%d", start.Unix()))
 	q.Add("end", fmt.Sprintf("%d", end.Unix()))
-	q.Add("step", "1h") // 1 hour resolution
+	q.Add("step", "1d") // 1 day resolution
 	req.URL.RawQuery = q.Encode()
 
 	// Log the full query URL for debugging
