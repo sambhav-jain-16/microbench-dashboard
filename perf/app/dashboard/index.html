@@ -7,99 +7,232 @@ license that can be found in the LICENSE file.
 <!DOCTYPE html>
 <html lang="en">
 <head>
-	<title>Performance Dashboard</title>
+	<title>CockroachDB Microbenchmark Dashboard</title>
 	<link rel="icon" href="https://www.cockroachlabs.com/favicon.ico"/>
 	<link rel="stylesheet" href="./static/style.css"/>
 	<script src="https://ajax.googleapis.com/ajax/libs/d3js/7.4.2/d3.min.js"></script>
 	<script src="./third_party/bandchart/bandchart.js"></script>
 	<script src="./static/range.js"></script>
+	<style>
+		/* Sidebar styles */
+		body.Dashboard {
+			margin: 0;
+			padding: 0;
+			overflow-x: hidden;
+		}
+		.dashboard-container {
+			display: flex;
+			position: relative;
+			min-height: calc(100vh - 40px);
+		}
+		.sidebar {
+			width: 280px;
+			background: #fff;
+			border-right: 1px solid #ddd;
+			overflow-y: auto;
+			transition: transform 0.3s ease;
+			position: sticky;
+			top: 0;
+			height: 100vh;
+			z-index: 100;
+		}
+		.sidebar.collapsed {
+			transform: translateX(-280px);
+		}
+		.main-content {
+			flex: 1;
+			transition: margin-left 0.3s ease;
+		}
+		.main-content.expanded {
+			margin-left: 0;
+		}
+		.sidebar-toggle {
+			position: absolute;
+			top: 70px;
+			right: -30px;
+			width: 30px;
+			height: 30px;
+			background: #f8f8f8;
+			border: 1px solid #ddd;
+			border-left: none;
+			cursor: pointer;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			z-index: 100;
+		}
+		.sidebar-toggle:hover {
+			background: #eaeaea;
+		}
+		.sidebar-header {
+			padding: 15px;
+			border-bottom: 1px solid #ddd;
+			background: #f8f8f8;
+			position: sticky;
+			top: 0;
+			z-index: 10;
+		}
+		.sidebar-search {
+			padding: 10px 15px;
+			border-bottom: 1px solid #ddd;
+			background: #fff;
+			position: sticky;
+			top: 54px;
+			z-index: 9;
+		}
+		.sidebar-search input {
+			width: 100%;
+			padding: 8px;
+			border: 1px solid #ddd;
+			border-radius: 4px;
+		}
+		.test-list {
+			padding: 0;
+			margin: 0;
+			list-style: none;
+			height: calc(100vh - 110px);
+			overflow-y: auto;
+		}
+		.test-item {
+			padding: 10px 15px;
+			border-bottom: 1px solid #eee;
+			transition: background 0.2s;
+		}
+		.test-item:hover {
+			background: #f5f5f5;
+		}
+		.test-item a {
+			color: #2c5282;
+			text-decoration: none;
+			display: block;
+			word-wrap: break-word;
+			white-space: normal;
+		}
+		.test-item a:hover {
+			text-decoration: underline;
+		}
+		.loading-tests {
+			padding: 15px;
+			text-align: center;
+			color: #666;
+		}
+		.topbar-with-controls {
+			position: sticky;
+			top: 0;
+			z-index: 50;
+			background: #fff;
+		}
+	</style>
 </head>
 
 <body class="Dashboard">
 
-<header class="Dashboard-topbar">
-	<h1>
-		<a href="/">CockroachDB Roachperf Dashboard</a>
-	</h1>
-</header>
+<div class="dashboard-container">
+	<!-- Sidebar -->
+	<div id="sidebar" class="sidebar">
+		<div class="sidebar-header">
+			<h3>Available Benchmarks</h3>
+		</div>
+		<div class="sidebar-search">
+			<input type="text" id="sidebar-search-input" placeholder="Search tests...">
+		</div>
+		<div id="sidebar-tests" class="test-list">
+			<div class="loading-tests">Loading tests...</div>
+		</div>
+		<div class="sidebar-toggle" id="sidebar-toggle">
+			&lt;
+		</div>
+	</div>
 
-<nav class="Dashboard-controls">
-	<form autocomplete="off" action="./">
-		<ul>
-			<li>
-				<div class="Dashboard-search-benchmark">
-					<input id="benchmark-input" type="text" name="benchmark" placeholder="Type benchmark name..." />
-				</div>
-				<div class="Dashboard-search-unit">
-					<input id="unit-input" type="text" name="unit" placeholder="Unit (optional)" />
-				</div>
-				<input type="submit" />
-				<div class="Dashboard-search-regex">
-					<input type="checkbox" id="regex-input" name="regex" />
-					<label for="regex-input">RegEx</label>
-				</div>
-				<div class="Dashboard-search-regressions">
-					<input type="checkbox" id="regressions-input" name="regressions" />
-					<label for="regressions-input">Regressions First</label>
-				</div>
-			</li>
-			<span class="left-separator"></span>
-			<li>
-				Cloud:
-				<select id="cloud-select" name="cloud">
-					<option value="gce">GCE</option>
-					<option value="aws">AWS</option>
-					<option value="azure">Azure</option>
-				</select>
-				branch:
-				<select id="branch-select" name="branch"></select>
-				Duration (days):
-				<div class="Dashboard-duration">
-					<input id="days-input" type="number" name="days" value="90" />
-				</div>
-				Baseline (days):
-				<div class="Dashboard-baseline">
-					<input id="baseline-input" type="number" name="baseline" value="45" />
-				</div>
-				End (UTC): <input id="end-input" type="datetime-local" name="end" />
-				<input type="submit">
-			</li>
-		</ul>
-	</form>
-</nav>
+	<!-- Main content -->
+	<div id="main-content" class="main-content">
+		<div class="topbar-with-controls">
+			<header class="Dashboard-topbar">
+				<h1>
+					<a href="/">CockroachDB Roachperf Dashboard</a>
+				</h1>
+			</header>
 
-<div class="Dashboard-documentation">
-	<p>
-		Each graph displays benchmark results relative to its baseline
-		commit, which is usually the latest stable release at
-		the time of testing. The 95% confidence interval is displayed
-		in light gray. On hover, the graph displays the benchmarked
-		commit at that point (click to view full commit).
-	</p>
-	<p>
-		Note that some commits are not tested, so there could be
-		multiple commits (not shown) between two points on the graph.
-	</p>
-	<p>
-		Using the 'unit' search box above leads to a page that shows much
-		more detail about each individual point in the selected time range.
-		Another way of reaching this page is to click the unit name that acts
-		as each graph's title, i.e. "sec/op".
-	</p>
-	<p>
-		<strong>Baseline Comparison:</strong> You can compare metrics against a historical baseline by adjusting the "Baseline" field (default: 45 days). 
-		When a baseline is set, each data point is compared to the same metric from the baseline period. The dashboard calculates this comparison locally—baseline
-		is not a label in VictoriaMetrics but rather a way to compare current metrics against historical data.
-		With Duration=90 and Baseline=45, each data point will be compared to its value from 45 days before the start of the 90-day window.
-		Positive values indicate regressions, negative values indicate improvements. This is particularly useful for identifying performance trends over time.
-	</p>
+			<nav class="Dashboard-controls">
+				<form autocomplete="off" action="./">
+					<ul>
+						<li>
+							<div class="Dashboard-search-benchmark">
+								<input id="benchmark-input" type="text" name="benchmark" placeholder="Type benchmark name..." />
+							</div>
+							<div class="Dashboard-search-unit">
+								<input id="unit-input" type="text" name="unit" placeholder="Unit (optional)" />
+							</div>
+							<input type="submit" />
+							<div class="Dashboard-search-regex">
+								<input type="checkbox" id="regex-input" name="regex" />
+								<label for="regex-input">RegEx</label>
+							</div>
+							<div class="Dashboard-search-regressions">
+								<input type="checkbox" id="regressions-input" name="regressions" />
+								<label for="regressions-input">Regressions First</label>
+							</div>
+						</li>
+						<span class="left-separator"></span>
+						<li>
+							Cloud:
+							<select id="cloud-select" name="cloud">
+								<option value="gce">GCE</option>
+								<option value="aws">AWS</option>
+								<option value="azure">Azure</option>
+							</select>
+							branch:
+							<select id="branch-select" name="branch"></select>
+							Duration (days):
+							<div class="Dashboard-duration">
+								<input id="days-input" type="number" name="days" value="90" />
+							</div>
+							Baseline (days):
+							<div class="Dashboard-baseline">
+								<input id="baseline-input" type="number" name="baseline" value="45" />
+							</div>
+							End (UTC): <input id="end-input" type="datetime-local" name="end" />
+							<input type="submit">
+						</li>
+					</ul>
+				</form>
+			</nav>
+		</div>
+
+		<div class="Dashboard-documentation">
+			<p>
+				Each graph displays benchmark results relative to its baseline
+				commit, which is usually the latest stable release at
+				the time of testing. The 95% confidence interval is displayed
+				in light gray. On hover, the graph displays the benchmarked
+				commit at that point (click to view full commit).
+			</p>
+			<p>
+				Note that some commits are not tested, so there could be
+				multiple commits (not shown) between two points on the graph.
+			</p>
+			<p>
+				Using the 'unit' search box above leads to a page that shows much
+				more detail about each individual point in the selected time range.
+				Another way of reaching this page is to click the unit name that acts
+				as each graph's title, i.e. "sec/op".
+			</p>
+			<p>
+				<strong>Baseline Comparison:</strong> You can compare metrics against a historical baseline by adjusting the "Baseline" field (default: 45 days). 
+				When a baseline is set, each data point is compared to the same metric from the baseline period. The dashboard calculates this comparison locally—baseline
+				is not a label in VictoriaMetrics but rather a way to compare current metrics against historical data.
+				With Duration=90 and Baseline=45, each data point will be compared to its value from 45 days before the start of the 90-day window.
+				Positive values indicate regressions, negative values indicate improvements. This is particularly useful for identifying performance trends over time.
+			</p>
+		</div>
+
+		<grid id="dashboard">
+			<grid id="loading" class="Dashboard-section Dashboard-section-expand">
+				<h2 class="Dashboard-title" id="loading">Loading...</h2>
+			</grid>
+		</grid>
+	</div>
 </div>
-
-<grid id="dashboard">
-	<grid id="loading" class="Dashboard-section Dashboard-section-expand">
-		<h2 class="Dashboard-title" id="loading">Loading...</h2>
-	</grid>
-</grid>
 
 <script>
 // minViewPercentDelta represents the minimum range we're willing to
@@ -530,7 +663,13 @@ fetch(dataURL)
 			c.Date = new Date(c.Date);
 		})
 
-		// Figure out the date range we care about.
+		// Check if we should just show all benchmarks when no search is provided
+		// This makes the page serve as both the dashboard and test list
+		if (!benchmark && !unit) {
+			// Make sure sidebar is expanded by default on the main page
+			document.getElementById('sidebar').classList.remove('collapsed');
+			document.getElementById('main-content').classList.remove('expanded');
+		}
 
 		// If we have an explicit unit, then there should be just one result.
 		if (unit) {
@@ -549,9 +688,95 @@ let unitLinkParams = new URLSearchParams(window.location.search);
 unitLinkParams.set("unit", unit);
 unitLinkParams.set("benchmark", benchmark);
 // Preserve baseline parameter if it exists
+const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.has('baseline')) {
 	unitLinkParams.set("baseline", urlParams.get('baseline'));
 }
+
+// Sidebar functionality
+function fetchTestsForSidebar() {
+    fetch('./tests.json')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Failed to fetch tests');
+            }
+            return response.json();
+        })
+        .then(data => {
+            populateSidebar(data.tests);
+        })
+        .catch(error => {
+            console.error('Error fetching tests for sidebar:', error);
+            document.getElementById('sidebar-tests').innerHTML = '<div class="error">Error loading tests</div>';
+        });
+}
+
+function populateSidebar(tests) {
+    const testList = document.getElementById('sidebar-tests');
+    testList.innerHTML = ''; // Clear loading message
+    
+    if (tests.length === 0) {
+        testList.innerHTML = '<div class="error">No tests found</div>';
+        return;
+    }
+    
+    // Get current URL parameters to preserve them in test links
+    const urlParams = new URLSearchParams(window.location.search);
+    const cloud = urlParams.get('cloud') || 'gce';
+    const branch = urlParams.get('branch') || 'master';
+    const days = urlParams.get('days') || '90';
+    const baseline = urlParams.get('baseline') || '45';
+    
+    tests.forEach(test => {
+        const item = document.createElement('div');
+        item.className = 'test-item';
+        
+        const link = document.createElement('a');
+        // Create link with current parameters preserved
+        link.href = `?benchmark=${encodeURIComponent(test)}&cloud=${cloud}&branch=${branch}&days=${days}&baseline=${baseline}`;
+        link.textContent = test;
+        link.title = test; // Show full name on hover
+        
+        item.appendChild(link);
+        testList.appendChild(item);
+    });
+    
+    // Setup search functionality
+    const searchInput = document.getElementById('sidebar-search-input');
+    searchInput.addEventListener('input', () => {
+        const searchTerm = searchInput.value.toLowerCase();
+        
+        // Filter test items
+        const items = testList.querySelectorAll('.test-item');
+        items.forEach(item => {
+            const testName = item.querySelector('a').textContent.toLowerCase();
+            if (testName.includes(searchTerm)) {
+                item.style.display = 'block';
+            } else {
+                item.style.display = 'none';
+            }
+        });
+    });
+}
+
+// Toggle sidebar visibility
+document.getElementById('sidebar-toggle').addEventListener('click', function() {
+    const sidebar = document.getElementById('sidebar');
+    const mainContent = document.getElementById('main-content');
+    const toggle = document.getElementById('sidebar-toggle');
+    
+    sidebar.classList.toggle('collapsed');
+    mainContent.classList.toggle('expanded');
+    
+    if (sidebar.classList.contains('collapsed')) {
+        toggle.innerHTML = '&gt;';
+    } else {
+        toggle.innerHTML = '&lt;';
+    }
+});
+
+// Load tests for sidebar when page loads
+document.addEventListener('DOMContentLoaded', fetchTestsForSidebar);
 </script>
 
 </body>

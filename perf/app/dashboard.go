@@ -40,23 +40,11 @@ type TestsJSON struct {
 
 // dashboardRegisterOnMux registers the dashboard URLs on mux.
 func (a *App) dashboardRegisterOnMux(mux *http.ServeMux) {
-	// Serve main.html as the default dashboard page
+	// Serve index.html as the default dashboard page
 	mux.HandleFunc("/dashboard/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/dashboard/" {
-			// If benchmark parameter is present, serve index.html
-			if r.URL.Query().Get("benchmark") != "" {
-				data, err := dashboardFS.ReadFile("dashboard/index.html")
-				if err != nil {
-					http.Error(w, "Internal server error", http.StatusInternalServerError)
-					return
-				}
-				w.Header().Set("Content-Type", "text/html")
-				w.Write(data)
-				return
-			}
-
-			// Otherwise serve main.html for the root dashboard path
-			data, err := dashboardFS.ReadFile("dashboard/main.html")
+			// Always serve index.html which now includes the test list sidebar
+			data, err := dashboardFS.ReadFile("dashboard/index.html")
 			if err != nil {
 				http.Error(w, "Internal server error", http.StatusInternalServerError)
 				return
