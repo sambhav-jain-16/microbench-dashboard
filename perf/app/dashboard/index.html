@@ -772,12 +772,12 @@ function prefillSearch(formFields) {
 	if (end) {
 		input.value = end;
 	} else {
-		// toISOString always uses UTC, then we just chop off the end
-		// of string to get the datetime-local format of
-		// 2000-12-31T15:00.
-		//
-		// Yes, this is really the suggested approach...
-		input.value = now.toISOString().slice(0, 16);
+		// Format today's date in UTC as YYYY-MM-DD
+		const today = new Date();
+		const year = today.getUTCFullYear();
+		const month = String(today.getUTCMonth() + 1).padStart(2, '0');
+		const day = String(today.getUTCDate()).padStart(2, '0');
+		input.value = `${year}-${month}-${day}`;
 	}
 }
 fetch('./formfields.json')

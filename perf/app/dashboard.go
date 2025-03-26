@@ -455,6 +455,7 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	end = end.Add(24 * time.Hour)
 	start := end.Add(-24 * time.Hour * time.Duration(days))
 
 	// Calculate baseline start and end times if a baseline was specified
@@ -561,7 +562,7 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 								// Specific benchmark and unit query
 								log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s, unit=%s",
 									metricName, benchmark, cloud, branch, unit)
-								metricQuery = fmt.Sprintf(`%s{test="%s",cloud="%s",branch="%s",unit="%s"}`,
+								metricQuery = fmt.Sprintf(`avg_over_time(%s{test="%s",cloud="%s",branch="%s",unit="%s"}[1d])`,
 									metricName, benchmark, cloud, branch, unit)
 							} else {
 								// Query for all units of this test
@@ -574,7 +575,7 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 								log.Printf("Querying for metric=%s, cloud=%s, branch=%s, test filter=%s",
 									metricName, cloud, branch, benchmarkFilter)
-								metricQuery = fmt.Sprintf(`%s{cloud="%s",branch="%s"%s,unit!=""}`,
+								metricQuery = fmt.Sprintf(`avg_over_time(%s{cloud="%s",branch="%s"%s,unit!=""}[1d])`,
 									metricName, cloud, branch, benchmarkFilter)
 							}
 
@@ -706,6 +707,11 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 					for i, b := range compBenchmarks {
 						log.Printf("Comparison %d: %s (%s) with %d values",
 							i, b.Name, b.Unit, len(b.Values))
+					}
+
+					// Calculate regressions for each benchmark
+					for _, benchmark := range compBenchmarks {
+						benchmark.Regression = worstRegression(benchmark)
 					}
 
 					return compBenchmarks, nil
@@ -1728,6 +1734,11 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			})
 			benchmarks = append(benchmarks, benchmark)
 		}
+	}
+
+	// Calculate regressions for each benchmark
+	for _, benchmark := range benchmarks {
+		benchmark.Regression = worstRegression(benchmark)
 	}
 
 	log.Printf("Created %d benchmark comparisons", len(benchmarks))
