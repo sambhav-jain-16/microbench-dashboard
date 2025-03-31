@@ -765,13 +765,14 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 			ResultType string `json:"resultType"`
 			Result     []struct {
 				Metric struct {
-					Name   string `json:"__name__"`
-					Test   string `json:"test"`
-					Unit   string `json:"unit"`
-					Branch string `json:"branch"`
-					Cloud  string `json:"cloud"`
-					Goos   string `json:"goos"`
-					Goarch string `json:"goarch"`
+					Name          string `json:"__name__"`
+					Test          string `json:"test"`
+					Unit          string `json:"unit"`
+					Branch        string `json:"branch"`
+					Cloud         string `json:"cloud"`
+					Goos          string `json:"goos"`
+					Goarch        string `json:"goarch"`
+					TeamCityRunID string `json:"test_run_id"`
 				} `json:"metric"`
 				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 			} `json:"result"`
@@ -822,11 +823,12 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 					ResultType string `json:"resultType"`
 					Result     []struct {
 						Metric struct {
-							Name   string `json:"__name__"`
-							Test   string `json:"test"`
-							Unit   string `json:"unit"`
-							Branch string `json:"branch"`
-							Cloud  string `json:"cloud"`
+							Name          string `json:"__name__"`
+							Test          string `json:"test"`
+							Unit          string `json:"unit"`
+							Branch        string `json:"branch"`
+							Cloud         string `json:"cloud"`
+							TeamCityRunID string `json:"test_run_id"`
 						} `json:"metric"`
 						Values [][]interface{} `json:"values"`
 					} `json:"result"`
@@ -880,15 +882,21 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 							continue
 						}
 
+						// Use test_run_id as commit hash if available
+						commitHash := "baseline"
+						if result.Metric.TeamCityRunID != "" {
+							commitHash = extractTeamCityRunID(result.Metric.TeamCityRunID)
+						}
+
 						benchmark.Values = append(benchmark.Values, ValueJSON{
 							CommitDate:           time.Unix(int64(ts), 0),
-							CommitHash:           fmt.Sprintf("%d", int64(ts)),
+							CommitHash:           commitHash,
 							BaselineCommitHash:   "baseline",
 							BaselineCommitDate:   time.Unix(int64(ts), 0),
 							BenchmarksCommitHash: "benchmarks",
-							Low:                  value - 0.05,
+							Low:                  value,
 							Center:               value,
-							High:                 value + 0.05,
+							High:                 value,
 						})
 					}
 
@@ -984,16 +992,22 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 				continue
 			}
 
+			// Use test_run_id as commit hash if available
+			commitHash := fmt.Sprintf("%d", int64(ts)) // Fallback to timestamp
+			if result.Metric.TeamCityRunID != "" {
+				commitHash = extractTeamCityRunID(result.Metric.TeamCityRunID)
+			}
+
 			// Create a ValueJSON with confidence intervals
 			benchmark.Values = append(benchmark.Values, ValueJSON{
 				CommitDate:           time.Unix(int64(ts), 0),
-				CommitHash:           fmt.Sprintf("%d", int64(ts)), // Use timestamp as hash for now
+				CommitHash:           commitHash,
 				BaselineCommitHash:   "baseline",
 				BaselineCommitDate:   time.Unix(int64(ts), 0),
 				BenchmarksCommitHash: "benchmarks",
-				Low:                  value - 0.05, // Estimate confidence interval
+				Low:                  value, // Estimate confidence interval
 				Center:               value,
-				High:                 value + 0.05, // Estimate confidence interval
+				High:                 value, // Estimate confidence interval
 			})
 		}
 	}
@@ -1524,14 +1538,14 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 				ResultType string `json:"resultType"`
 				Result     []struct {
 					Metric struct {
-						Name   string `json:"__name__"`
-						Test   string `json:"test"`
-						Unit   string `json:"unit"`
-						Branch string `json:"branch"`
-						Cloud  string `json:"cloud"`
-						Goos   string `json:"goos"`
-						Goarch string `json:"goarch"`
-						// Add any other labels you expect here
+						Name          string `json:"__name__"`
+						Test          string `json:"test"`
+						Unit          string `json:"unit"`
+						Branch        string `json:"branch"`
+						Cloud         string `json:"cloud"`
+						Goos          string `json:"goos"`
+						Goarch        string `json:"goarch"`
+						TeamCityRunID string `json:"test_run_id"`
 					} `json:"metric"`
 					Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 				} `json:"result"`
@@ -1598,16 +1612,22 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
+				// Use test_run_id as commit hash if available
+				commitHash := fmt.Sprintf("%d", int64(ts)) // Fallback to timestamp
+				if result.Metric.TeamCityRunID != "" {
+					commitHash = extractTeamCityRunID(result.Metric.TeamCityRunID)
+				}
+
 				// Create a ValueJSON with confidence intervals
 				valueJSON := ValueJSON{
 					CommitDate:           time.Unix(int64(ts), 0),
-					CommitHash:           fmt.Sprintf("%d", int64(ts)), // Use timestamp as hash for now
+					CommitHash:           commitHash,
 					BaselineCommitHash:   "baseline",
 					BaselineCommitDate:   time.Unix(int64(ts), 0),
 					BenchmarksCommitHash: "benchmarks",
-					Low:                  value - 0.05, // Estimate confidence interval
+					Low:                  value, // Estimate confidence interval
 					Center:               value,
-					High:                 value + 0.05, // Estimate confidence interval
+					High:                 value, // Estimate confidence interval
 				}
 
 				benchmark.Values = append(benchmark.Values, valueJSON)
@@ -1699,16 +1719,22 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			// Calculate ratio and add confidence interval
 			ratio := point.Value / baselineAvg
 
+			// Get commit hash from test_run_id if available
+			commitHash := fmt.Sprintf("%d", point.Timestamp.Unix()) // Fallback to timestamp
+			if teamcityRunID, ok := point.Labels["test_run_id"]; ok && teamcityRunID != "" {
+				commitHash = extractTeamCityRunID(teamcityRunID)
+			}
+
 			// Create the value
 			value := ValueJSON{
 				CommitDate:           point.Timestamp,
-				CommitHash:           fmt.Sprintf("%d", point.Timestamp.Unix()),
+				CommitHash:           commitHash,
 				BaselineCommitHash:   "baseline",
 				BaselineCommitDate:   point.Timestamp,
 				BenchmarksCommitHash: "benchmarks",
-				Low:                  ratio*0.95 - 1, // 5% confidence interval
-				Center:               ratio - 1,      // Convert from ratio to delta
-				High:                 ratio*1.05 - 1, // 5% confidence interval
+				Low:                  ratio - 1, // 5% confidence interval
+				Center:               ratio - 1, // Convert from ratio to delta
+				High:                 ratio - 1, // 5% confidence interval
 			}
 
 			// Use day as the key to avoid duplicates
@@ -1754,6 +1780,15 @@ type MetricPoint struct {
 	Timestamp time.Time
 }
 
+// extractTeamCityRunID extracts the numeric part from a test_run_id label
+func extractTeamCityRunID(teamcityRunID string) string {
+	// Remove "teamcity-" prefix if present
+	if strings.HasPrefix(teamcityRunID, "teamcity-") {
+		return strings.TrimPrefix(teamcityRunID, "teamcity-")
+	}
+	return teamcityRunID
+}
+
 // convertVMDataToMetricPoints converts VictoriaMetrics data to a map of metric points
 func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) {
 	var response struct {
@@ -1762,13 +1797,14 @@ func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) 
 			ResultType string `json:"resultType"`
 			Result     []struct {
 				Metric struct {
-					Name   string `json:"__name__"`
-					Test   string `json:"test"`
-					Unit   string `json:"unit"`
-					Branch string `json:"branch"`
-					Cloud  string `json:"cloud"`
-					Goos   string `json:"goos"`
-					Goarch string `json:"goarch"`
+					Name          string `json:"__name__"`
+					Test          string `json:"test"`
+					Unit          string `json:"unit"`
+					Branch        string `json:"branch"`
+					Cloud         string `json:"cloud"`
+					Goos          string `json:"goos"`
+					Goarch        string `json:"goarch"`
+					TeamCityRunID string `json:"test_run_id"`
 				} `json:"metric"`
 				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 			} `json:"result"`
@@ -1884,13 +1920,14 @@ func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) 
 
 // createLabelsMap converts a metric struct to a map of labels
 func createLabelsMap(metric struct {
-	Name   string `json:"__name__"`
-	Test   string `json:"test"`
-	Unit   string `json:"unit"`
-	Branch string `json:"branch"`
-	Cloud  string `json:"cloud"`
-	Goos   string `json:"goos"`
-	Goarch string `json:"goarch"`
+	Name          string `json:"__name__"`
+	Test          string `json:"test"`
+	Unit          string `json:"unit"`
+	Branch        string `json:"branch"`
+	Cloud         string `json:"cloud"`
+	Goos          string `json:"goos"`
+	Goarch        string `json:"goarch"`
+	TeamCityRunID string `json:"test_run_id"`
 }) map[string]string {
 	labels := make(map[string]string)
 	labels["__name__"] = metric.Name
@@ -1900,5 +1937,6 @@ func createLabelsMap(metric struct {
 	labels["cloud"] = metric.Cloud
 	labels["goos"] = metric.Goos
 	labels["goarch"] = metric.Goarch
+	labels["test_run_id"] = metric.TeamCityRunID
 	return labels
 }
