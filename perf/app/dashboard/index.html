@@ -455,19 +455,9 @@ function addTable(bench, unit, repository, commits) {
 		params.set("var-benchmark", testName); // Add both as some dashboards might use either
 		params.set("var-cloud", cloudProvider); // Add cloud provider
 		
-		// Create formatted dates for link text
-		const currentDateStr = Intl.DateTimeFormat([], {
-			month: 'short',
-			day: 'numeric'
-		}).format(timestamp);
-		const baselineDateStr = Intl.DateTimeFormat([], {
-			month: 'short',
-			day: 'numeric'
-		}).format(baselineDate);
-		
-		// Construct the URL (this will need to be customized based on your Grafana setup)
+		// Construct the URL
 		link.href = `${window.grafanaURL}/d/benchmark-comparison/cockroach-benchmark-comparison?${params.toString()}`;
-		link.textContent = `Compare ${baselineDateStr} vs ${currentDateStr}`;
+		link.textContent = "Compare";
 		link.title = "Compare this benchmark in Grafana with detailed metrics";
 		link.target = "_blank";  // Open in new tab
 		

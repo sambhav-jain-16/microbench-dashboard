@@ -246,18 +246,9 @@ input[type=number] {
 .Dashboard-table .grafana-link a {
   color: #2c5282;
   text-decoration: none;
-  font-weight: 600;
-  padding: 8px 16px;
-  border: 1px solid #2c5282;
-  border-radius: 4px;
-  background-color: #EBF4FF;
-  display: inline-block;
-  transition: all 0.2s;
 }
 .Dashboard-table .grafana-link a:hover {
-  background-color: #2c5282;
-  color: white;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  text-decoration: underline;
 }
 .Dashboard-table-range svg {
   display: block;
