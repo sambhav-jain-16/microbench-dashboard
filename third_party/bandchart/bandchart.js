@@ -16,6 +16,7 @@ function BandChart(data, {
 	minViewDeltaPercent,
 	higherIsBetter,
 	history,
+	annotations = [], // Add annotations parameter
 } = {}) {
 	// Compute a set of valid hashes so we can filter out any bad values.
 	// This is to work around a bug where some test results have bad commits
@@ -343,6 +344,55 @@ function BandChart(data, {
 						)
 				})
 				.on("mouseout", () => svg.selectAll('.tooltip').remove());
+
+	// Add annotations
+	if (annotations && annotations.length > 0) {
+		const annotationGroup = svg.append("g")
+			.attr("class", "annotations");
+
+		annotations.forEach(annotation => {
+			// Find the commit hash for this date
+			const annotationDate = new Date(annotation.date);
+			let closestCommit = null;
+			let closestDiff = Infinity;
+
+			history.forEach(commit => {
+				const diff = Math.abs(commit.Date.getTime() - annotationDate.getTime());
+				if (diff < closestDiff) {
+					closestDiff = diff;
+					closestCommit = commit;
+				}
+			});
+
+			if (closestCommit) {
+				const x = xScale(closestCommit.Hash);
+				
+				// Add vertical line
+				annotationGroup.append("line")
+					.attr("x1", x)
+					.attr("y1", yRange[0])
+					.attr("x2", x)
+					.attr("y2", yRange[1])
+					.attr("stroke", annotation.color || "#00FF00")
+					.attr("stroke-width", 2)
+					.attr("stroke-dasharray", "4,4")
+					.attr("opacity", 0.7);
+
+				// Add annotation text with tooltip
+				const text = annotationGroup.append("text")
+					.attr("x", x)
+					.attr("y", yRange[0] - 5)
+					.attr("fill", annotation.color || "#00FF00")
+					.attr("text-anchor", "middle")
+					.attr("font-size", "12px")
+					.text(annotation.description);
+
+				// Add tooltip
+				text.append("title")
+					.text(annotation.description);
+			}
+		});
+	}
 
 	return svg.node();
 }

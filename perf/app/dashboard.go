@@ -25,6 +25,7 @@ import (
 	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/influxdata/influxdb-client-go/v2/api/query"
 	"golang.org/x/build/third_party/bandchart"
+	"gopkg.in/yaml.v3"
 )
 
 // /dashboard/ displays a dashboard of benchmark results over time for
@@ -66,6 +67,7 @@ func (a *App) dashboardRegisterOnMux(mux *http.ServeMux) {
 	mux.HandleFunc("/dashboard/metrics.json", a.listMetrics)
 	mux.HandleFunc("/dashboard/test_info.json", a.testInfo)
 	mux.HandleFunc("/dashboard/series_data.json", a.seriesDataToBenchmark)
+	mux.HandleFunc("/dashboard/annotations.json", annotationsHandler)
 }
 
 // DataJSON is the result of accessing the data.json endpoint.
@@ -1939,4 +1941,71 @@ func createLabelsMap(metric struct {
 	labels["goarch"] = metric.Goarch
 	labels["test_run_id"] = metric.TeamCityRunID
 	return labels
+}
+
+// annotationsHandler serves the annotations YAML file as JSON
+func annotationsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Handling annotations request")
+
+	// Read the annotations YAML file from the embedded filesystem
+	data, err := dashboardFS.ReadFile("dashboard/annotations.yaml")
+	if err != nil {
+		log.Printf("Error reading annotations file: %v", err)
+		// Try to list available files in the dashboard directory
+		files, err := dashboardFS.ReadDir("dashboard")
+		if err != nil {
+			log.Printf("Error listing dashboard directory: %v", err)
+		} else {
+			log.Printf("Available files in dashboard directory:")
+			for _, file := range files {
+				log.Printf("  - %s", file.Name())
+			}
+		}
+		http.Error(w, "Failed to read annotations file", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Successfully read annotations file, size: %d bytes", len(data))
+
+	// Parse YAML to map
+	var annotations map[string]interface{}
+	if err := yaml.Unmarshal(data, &annotations); err != nil {
+		log.Printf("Error parsing annotations YAML: %v", err)
+		log.Printf("Raw YAML content: %s", string(data))
+		http.Error(w, "Failed to parse annotations file", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Successfully parsed annotations YAML")
+
+	// Add color to each annotation
+	if global, ok := annotations["global"].([]interface{}); ok {
+		log.Printf("Found %d global annotations", len(global))
+		for i := range global {
+			if ann, ok := global[i].(map[string]interface{}); ok {
+				ann["color"] = "#00FF00" // Bright green for global annotations
+			}
+		}
+	}
+
+	if tests, ok := annotations["tests"].(map[string]interface{}); ok {
+		log.Printf("Found %d test-specific annotations", len(tests))
+		for testName, testAnns := range tests {
+			if anns, ok := testAnns.([]interface{}); ok {
+				log.Printf("Test %s has %d annotations", testName, len(anns))
+				for i := range anns {
+					if ann, ok := anns[i].(map[string]interface{}); ok {
+						ann["color"] = "#00FF00" // Bright green for test-specific annotations
+					}
+				}
+			}
+		}
+	}
+
+	// Set response headers
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(annotations); err != nil {
+		log.Printf("Error encoding annotations to JSON: %v", err)
+		http.Error(w, "Failed to encode annotations", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Successfully sent annotations response")
 }
