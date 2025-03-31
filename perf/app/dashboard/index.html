@@ -353,7 +353,6 @@ async function addCharts(benchmarks, repository, commits) {
 				})
 				.flatMap(([_, anns]) => anns)
 		];
-		console.log(`Annotations for benchmark ${bench.Name}:`, benchmarkAnnotations);
 
 		item.appendChild(BandChart(bench.Values, {
 			benchmark: bench.Name,

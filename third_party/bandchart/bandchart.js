@@ -356,13 +356,13 @@ window.BandChart = function(data, {
 			.attr("class", "annotations");
 
 		// Get the chart's time range
-		const chartStartTime = xScale.domain()[0];
-		const chartEndTime = xScale.domain()[1];
+		const chartStartTime = new Date(history[0].Date);
+		const chartEndTime = new Date(history[history.length - 1].Date);
 
 		annotations.forEach(annotation => {
-			// Skip annotations before the chart's start time
+			// Skip annotations outside the chart's time range
 			const annotationDate = new Date(annotation.date);
-			if (annotationDate < chartStartTime) {
+			if (annotationDate < chartStartTime || annotationDate > chartEndTime) {
 				return;
 			}
 
@@ -384,7 +384,8 @@ window.BandChart = function(data, {
 
 				// Create a group for the annotation
 				const annotationGroup = annotationsGroup.append("g")
-					.attr("class", "annotation");
+					.attr("class", "annotation")
+					.attr("id", `annotation-${Math.random().toString(36).substr(2, 9)}`); // Add unique ID
 
 				// Add vertical line
 				annotationGroup.append("line")
@@ -405,38 +406,44 @@ window.BandChart = function(data, {
 					.attr("fill", "transparent")
 					.attr("cursor", "pointer")
 					.on("mouseover", function(event) {
-						// Highlight the line
-						d3.select(this.parentNode).select("line")
-							.attr("stroke-width", 2);
+						const currentAnnotationId = this.parentNode.id;
+
+						// Remove any existing tooltips first
+						d3.selectAll(".annotation-tooltip").remove();
 
 						// Create and show tooltip
 						const tooltip = d3.select("body")
 							.append("div")
 							.attr("class", "annotation-tooltip")
+							.attr("data-annotation-id", currentAnnotationId)
 							.style("position", "absolute")
 							.style("background-color", "rgba(0, 0, 0, 0.8)")
 							.style("color", "white")
 							.style("padding", "8px 12px")
 							.style("border-radius", "4px")
 							.style("font-size", "12px")
-							.style("pointer-events", "none")
+							.style("pointer-events", "auto")
 							.style("z-index", "1000")
 							.style("box-shadow", "0 2px 4px rgba(0,0,0,0.2)");
 
-						tooltip.append("div")
+						// Create a container for tooltip content
+						const tooltipContent = tooltip.append("div")
+							.style("pointer-events", "auto");
+
+						tooltipContent.append("div")
 							.style("font-weight", "bold")
 							.style("margin-bottom", "4px")
 							.style("color", "#00FF00")
 							.text(annotation.date);
 
-						tooltip.append("div")
+						tooltipContent.append("div")
 							.style("max-width", "200px")
 							.style("margin-bottom", annotation.prs ? "8px" : "0")
 							.text(annotation.description);
 
 						// Add PR links if they exist
 						if (annotation.prs && annotation.prs.length > 0) {
-							const prContainer = tooltip.append("div")
+							const prContainer = tooltipContent.append("div")
 								.style("display", "flex")
 								.style("flex-wrap", "wrap")
 								.style("gap", "4px");
@@ -481,13 +488,70 @@ window.BandChart = function(data, {
 						tooltip
 							.style("left", `${left}px`)
 							.style("top", `${top}px`);
-					})
-					.on("mouseout", function() {
-						// Reset line width
-						d3.select(this.parentNode).select("line")
-							.attr("stroke-width", 1);
-						// Remove tooltip
-						d3.selectAll(".annotation-tooltip").remove();
+
+						// Highlight the line
+						d3.select(`#${currentAnnotationId}`).select("line")
+							.attr("stroke-width", 2);
+
+						let hideTimeout;
+						let isOverTooltip = false;
+						let isOverAnnotation = true;
+
+						// Add event listeners to the tooltip
+						tooltip
+							.on("mouseenter", function() {
+								isOverTooltip = true;
+								clearTimeout(hideTimeout);
+								// Keep the line highlighted
+								d3.select(`#${currentAnnotationId}`).select("line")
+									.attr("stroke-width", 2);
+							})
+							.on("mouseleave", function(event) {
+								isOverTooltip = false;
+								// Check if mouse is moving back to annotation
+								const annotationRect = d3.select(`#${currentAnnotationId}`).select("rect").node();
+								const annotationBounds = annotationRect.getBoundingClientRect();
+								const mouseX = event.clientX;
+								const mouseY = event.clientY;
+
+								hideTimeout = setTimeout(() => {
+									if (!isOverTooltip && !isOverAnnotation) {
+										d3.select(`#${currentAnnotationId}`).select("line")
+											.attr("stroke-width", 1);
+										d3.selectAll(".annotation-tooltip").remove();
+									}
+								}, 100);
+							});
+
+						// Update annotation area event handlers
+						d3.select(this)
+							.on("mouseleave", function(event) {
+								isOverAnnotation = false;
+								const tooltip = d3.select(".annotation-tooltip").node();
+								if (tooltip) {
+									const tooltipRect = tooltip.getBoundingClientRect();
+									const mouseX = event.clientX;
+									const mouseY = event.clientY;
+
+									// Check if mouse is moving to tooltip
+									if (mouseX >= tooltipRect.left - 5 && mouseX <= tooltipRect.right + 5 &&
+										mouseY >= tooltipRect.top - 5 && mouseY <= tooltipRect.bottom + 5) {
+										return;
+									}
+
+									hideTimeout = setTimeout(() => {
+										if (!isOverTooltip && !isOverAnnotation) {
+											d3.select(`#${currentAnnotationId}`).select("line")
+												.attr("stroke-width", 1);
+											d3.selectAll(".annotation-tooltip").remove();
+										}
+									}, 100);
+								}
+							})
+							.on("mouseenter", function() {
+								isOverAnnotation = true;
+								clearTimeout(hideTimeout);
+							});
 					});
 			}
 		});
