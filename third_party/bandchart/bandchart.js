@@ -2,14 +2,15 @@
 // Released under the ISC license.
 // https://observablehq.com/@d3/band-chart
 
-function BandChart(data, {
+// Export BandChart to the global scope
+window.BandChart = function(data, {
 	defined,
-	marginTop = 30, // top margin, in pixels
-	marginRight = 15, // right margin, in pixels
-	marginBottom = 30, // bottom margin, in pixels
-	marginLeft = 40, // left margin, in pixels
-	width = 480, // outer width, in pixels
-	height = 240, // outer height, in pixels
+	marginTop = 35, // increased from 20 to 35
+	marginRight = 60,
+	marginBottom = 35, // reduced from 100 to 35
+	marginLeft = 100,
+	innerWidth = 800,
+	innerHeight = 500,
 	benchmark,
 	unit,
 	cloud,
@@ -18,6 +19,10 @@ function BandChart(data, {
 	history,
 	annotations = [], // Add annotations parameter
 } = {}) {
+	// Calculate total dimensions including margins
+	const width = innerWidth + marginLeft + marginRight;
+	const height = innerHeight + marginTop + marginBottom;
+
 	// Compute a set of valid hashes so we can filter out any bad values.
 	// This is to work around a bug where some test results have bad commits
 	// attached to them.
@@ -240,7 +245,7 @@ function BandChart(data, {
 	// Add X axis label.
 	svg.append("text")
 		.attr("x", xRange[0] + (xRange[1]-xRange[0])/2)
-		.attr("y", yRange[0] + (yRange[0]-yRange[1])*0.10)
+		.attr("y", height - 10) // Position it near the bottom of the SVG
 		.attr("fill", "currentColor")
 		.attr("text-anchor", "middle")
 		.attr("font-size", "12px")
@@ -322,7 +327,7 @@ function BandChart(data, {
 							// Point center, low, high values.
 							// Bottom-right corner, next to "Commits".
 							.attr("x", xRange[1])
-							.attr("y", yRange[0] + (yRange[0]-yRange[1])*0.10)
+							.attr("y", height - 10) // Match the "Commits" text y-position
 							.attr("pointer-events", "none")
 							.attr("fill", "currentColor")
 							.attr("text-anchor", "end")
@@ -345,51 +350,113 @@ function BandChart(data, {
 				})
 				.on("mouseout", () => svg.selectAll('.tooltip').remove());
 
-	// Add annotations
+	// Add annotations if provided
 	if (annotations && annotations.length > 0) {
-		const annotationGroup = svg.append("g")
+		const annotationsGroup = svg.append("g")
 			.attr("class", "annotations");
 
+		// Get the chart's time range
+		const chartStartTime = xScale.domain()[0];
+		const chartEndTime = xScale.domain()[1];
+
 		annotations.forEach(annotation => {
-			// Find the commit hash for this date
+			// Skip annotations before the chart's start time
 			const annotationDate = new Date(annotation.date);
+			if (annotationDate < chartStartTime) {
+				return;
+			}
+
+			// Find the closest commit date from the history
 			let closestCommit = null;
-			let closestDiff = Infinity;
+			let minDiff = Infinity;
 
 			history.forEach(commit => {
-				const diff = Math.abs(commit.Date.getTime() - annotationDate.getTime());
-				if (diff < closestDiff) {
-					closestDiff = diff;
+				const commitDate = new Date(commit.Date);
+				const diff = Math.abs(commitDate - annotationDate);
+				if (diff < minDiff) {
+					minDiff = diff;
 					closestCommit = commit;
 				}
 			});
 
 			if (closestCommit) {
 				const x = xScale(closestCommit.Hash);
-				
+
+				// Create a group for the annotation
+				const annotationGroup = annotationsGroup.append("g")
+					.attr("class", "annotation");
+
 				// Add vertical line
 				annotationGroup.append("line")
 					.attr("x1", x)
-					.attr("y1", yRange[0])
+					.attr("y1", marginTop)
 					.attr("x2", x)
-					.attr("y2", yRange[1])
+					.attr("y2", height - marginBottom)
 					.attr("stroke", annotation.color || "#00FF00")
-					.attr("stroke-width", 2)
-					.attr("stroke-dasharray", "4,4")
-					.attr("opacity", 0.7);
+					.attr("stroke-width", 1)
+					.attr("stroke-dasharray", "4,4");
 
-				// Add annotation text with tooltip
-				const text = annotationGroup.append("text")
-					.attr("x", x)
-					.attr("y", yRange[0] - 5)
-					.attr("fill", annotation.color || "#00FF00")
-					.attr("text-anchor", "middle")
-					.attr("font-size", "12px")
-					.text(annotation.description);
+				// Add invisible rectangle for hover area
+				annotationGroup.append("rect")
+					.attr("x", x - 10)
+					.attr("y", marginTop)
+					.attr("width", 20)
+					.attr("height", height - marginTop - marginBottom)
+					.attr("fill", "transparent")
+					.attr("cursor", "pointer")
+					.on("mouseover", function(event) {
+						// Highlight the line
+						d3.select(this.parentNode).select("line")
+							.attr("stroke-width", 2);
 
-				// Add tooltip
-				text.append("title")
-					.text(annotation.description);
+						// Create and show tooltip
+						const tooltip = d3.select("body")
+							.append("div")
+							.attr("class", "annotation-tooltip")
+							.style("position", "absolute")
+							.style("background-color", "rgba(0, 0, 0, 0.8)")
+							.style("color", "white")
+							.style("padding", "8px 12px")
+							.style("border-radius", "4px")
+							.style("font-size", "12px")
+							.style("pointer-events", "none")
+							.style("z-index", "1000")
+							.style("box-shadow", "0 2px 4px rgba(0,0,0,0.2)");
+
+						tooltip.append("div")
+							.style("font-weight", "bold")
+							.style("margin-bottom", "4px")
+							.style("color", "#00FF00")
+							.text(annotation.date);
+
+						tooltip.append("div")
+							.style("max-width", "200px")
+							.text(annotation.description);
+
+						// Position tooltip
+						const svgRect = svg.node().getBoundingClientRect();
+						const tooltipRect = tooltip.node().getBoundingClientRect();
+						
+						// Calculate position to be right next to the line
+						let left = svgRect.left + x + 5; // Position 5px to the right of the line
+						let top = event.clientY - tooltipRect.height / 2; // Center vertically with cursor
+
+						// Ensure tooltip stays within viewport
+						if (left + tooltipRect.width > window.innerWidth) {
+							left = svgRect.left + x - tooltipRect.width - 5; // Position to the left of the line
+						}
+
+						tooltip
+							.style("left", `${left}px`)
+							.style("top", `${top}px`);
+					})
+					.on("mouseout", function() {
+						// Reset line width
+						d3.select(this.parentNode).select("line")
+							.attr("stroke-width", 1);
+						// Remove tooltip
+						d3.selectAll(".annotation-tooltip").remove();
+					});
 			}
 		});
 	}

@@ -1951,26 +1951,15 @@ func annotationsHandler(w http.ResponseWriter, r *http.Request) {
 	data, err := dashboardFS.ReadFile("dashboard/annotations.yaml")
 	if err != nil {
 		log.Printf("Error reading annotations file: %v", err)
-		// Try to list available files in the dashboard directory
-		files, err := dashboardFS.ReadDir("dashboard")
-		if err != nil {
-			log.Printf("Error listing dashboard directory: %v", err)
-		} else {
-			log.Printf("Available files in dashboard directory:")
-			for _, file := range files {
-				log.Printf("  - %s", file.Name())
-			}
-		}
 		http.Error(w, "Failed to read annotations file", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("Successfully read annotations file, size: %d bytes", len(data))
+	log.Printf("Successfully read annotations file")
 
 	// Parse YAML to map
 	var annotations map[string]interface{}
 	if err := yaml.Unmarshal(data, &annotations); err != nil {
 		log.Printf("Error parsing annotations YAML: %v", err)
-		log.Printf("Raw YAML content: %s", string(data))
 		http.Error(w, "Failed to parse annotations file", http.StatusInternalServerError)
 		return
 	}
@@ -1986,18 +1975,35 @@ func annotationsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Convert test patterns to regex and add color
 	if tests, ok := annotations["tests"].(map[string]interface{}); ok {
 		log.Printf("Found %d test-specific annotations", len(tests))
-		for testName, testAnns := range tests {
+		// Create a new map for the processed test patterns
+		processedTests := make(map[string]interface{})
+
+		for testPattern, testAnns := range tests {
+			// Convert the pattern to a proper regex if it's not already one
+			if !strings.HasPrefix(testPattern, "^") {
+				// Escape special regex characters in the pattern
+				escaped := regexp.QuoteMeta(testPattern)
+				// Convert glob-style * to regex .*
+				escaped = strings.ReplaceAll(escaped, "\\*", ".*")
+				testPattern = "^" + escaped + "$"
+			}
+
 			if anns, ok := testAnns.([]interface{}); ok {
-				log.Printf("Test %s has %d annotations", testName, len(anns))
+				log.Printf("Test pattern %s has %d annotations", testPattern, len(anns))
 				for i := range anns {
 					if ann, ok := anns[i].(map[string]interface{}); ok {
 						ann["color"] = "#00FF00" // Bright green for test-specific annotations
 					}
 				}
 			}
+			processedTests[testPattern] = testAnns
 		}
+
+		// Replace the original tests map with the processed one
+		annotations["tests"] = processedTests
 	}
 
 	// Set response headers

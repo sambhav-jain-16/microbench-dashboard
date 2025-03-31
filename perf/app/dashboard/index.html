@@ -341,7 +341,17 @@ async function addCharts(benchmarks, repository, commits) {
 		// Get annotations for this benchmark
 		const benchmarkAnnotations = [
 			...annotations.global,
-			...(annotations.tests[bench.Name] || [])
+			...Object.entries(annotations.tests || {})
+				.filter(([pattern, _]) => {
+					try {
+						const regex = new RegExp(pattern);
+						return regex.test(bench.Name);
+					} catch (e) {
+						console.error(`Invalid regex pattern: ${pattern}`, e);
+						return false;
+					}
+				})
+				.flatMap(([_, anns]) => anns)
 		];
 		console.log(`Annotations for benchmark ${bench.Name}:`, benchmarkAnnotations);
 

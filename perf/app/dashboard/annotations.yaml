@@ -4,15 +4,11 @@ global:
     description: "Major GC improvements"
   - date: "2024-12-01"
     description: "Memory allocator changes"
+  - date: "2024-01-01"
+    description: "Memory allocator changes"
 
 # Test-specific annotations
 tests:
-  "BenchmarkKV/Insert/SQL":  # Test name
-    - date: "2024-10-10"
-      description: "Index optimization"
-    - date: "2024-03-05"
+  "kv":  # Test name
+    - date: "2024-12-05"
       description: "Query planner changes"
-
-  "BenchmarkKV/Delete/SQL":  # Another test
-    - date: "2024-10-12"
-      description: "Delete performance improvements"
