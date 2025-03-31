@@ -1945,73 +1945,81 @@ func createLabelsMap(metric struct {
 
 // annotationsHandler serves the annotations YAML file as JSON
 func annotationsHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Handling annotations request")
-
-	// Read the annotations YAML file from the embedded filesystem
+	// Read the annotations file
 	data, err := dashboardFS.ReadFile("dashboard/annotations.yaml")
 	if err != nil {
 		log.Printf("Error reading annotations file: %v", err)
-		http.Error(w, "Failed to read annotations file", http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("Successfully read annotations file")
 
-	// Parse YAML to map
-	var annotations map[string]interface{}
+	// Parse the YAML into a map
+	var annotations struct {
+		Global []struct {
+			Date        string `yaml:"date"`
+			Description string `yaml:"description"`
+			PRs         []int  `yaml:"prs,omitempty"` // Added PRs field
+		} `yaml:"global"`
+		Tests map[string][]struct {
+			Date        string `yaml:"date"`
+			Description string `yaml:"description"`
+			PRs         []int  `yaml:"prs,omitempty"` // Added PRs field
+		} `yaml:"tests"`
+	}
+
 	if err := yaml.Unmarshal(data, &annotations); err != nil {
 		log.Printf("Error parsing annotations YAML: %v", err)
-		http.Error(w, "Failed to parse annotations file", http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("Successfully parsed annotations YAML")
 
-	// Add color to each annotation
-	if global, ok := annotations["global"].([]interface{}); ok {
-		log.Printf("Found %d global annotations", len(global))
-		for i := range global {
-			if ann, ok := global[i].(map[string]interface{}); ok {
-				ann["color"] = "#00FF00" // Bright green for global annotations
-			}
-		}
+	// Convert the annotations to the format expected by the frontend
+	result := struct {
+		Global []map[string]interface{}            `json:"global"`
+		Tests  map[string][]map[string]interface{} `json:"tests"`
+	}{
+		Global: make([]map[string]interface{}, 0, len(annotations.Global)),
+		Tests:  make(map[string][]map[string]interface{}),
 	}
 
-	// Convert test patterns to regex and add color
-	if tests, ok := annotations["tests"].(map[string]interface{}); ok {
-		log.Printf("Found %d test-specific annotations", len(tests))
-		// Create a new map for the processed test patterns
-		processedTests := make(map[string]interface{})
-
-		for testPattern, testAnns := range tests {
-			// Convert the pattern to a proper regex if it's not already one
-			if !strings.HasPrefix(testPattern, "^") {
-				// Escape special regex characters in the pattern
-				escaped := regexp.QuoteMeta(testPattern)
-				// Convert glob-style * to regex .*
-				escaped = strings.ReplaceAll(escaped, "\\*", ".*")
-				testPattern = "^" + escaped + "$"
-			}
-
-			if anns, ok := testAnns.([]interface{}); ok {
-				log.Printf("Test pattern %s has %d annotations", testPattern, len(anns))
-				for i := range anns {
-					if ann, ok := anns[i].(map[string]interface{}); ok {
-						ann["color"] = "#00FF00" // Bright green for test-specific annotations
-					}
-				}
-			}
-			processedTests[testPattern] = testAnns
+	// Process global annotations
+	for _, ann := range annotations.Global {
+		annotation := map[string]interface{}{
+			"date":        ann.Date,
+			"description": ann.Description,
+			"color":       "#00FF00", // Bright green color
 		}
+		if len(ann.PRs) > 0 {
+			annotation["prs"] = ann.PRs
+		}
+		result.Global = append(result.Global, annotation)
+	}
 
-		// Replace the original tests map with the processed one
-		annotations["tests"] = processedTests
+	// Process test-specific annotations
+	for pattern, anns := range annotations.Tests {
+		testAnnotations := make([]map[string]interface{}, 0, len(anns))
+		for _, ann := range anns {
+			annotation := map[string]interface{}{
+				"date":        ann.Date,
+				"description": ann.Description,
+				"color":       "#00FF00", // Bright green color
+			}
+			if len(ann.PRs) > 0 {
+				annotation["prs"] = ann.PRs
+			}
+			testAnnotations = append(testAnnotations, annotation)
+		}
+		result.Tests[pattern] = testAnnotations
 	}
 
 	// Set response headers
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(annotations); err != nil {
-		log.Printf("Error encoding annotations to JSON: %v", err)
-		http.Error(w, "Failed to encode annotations", http.StatusInternalServerError)
+	w.Header().Set("Cache-Control", "no-cache")
+
+	// Write the response
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("Error encoding annotations response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("Successfully sent annotations response")
 }

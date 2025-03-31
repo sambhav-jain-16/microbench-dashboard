@@ -431,7 +431,39 @@ window.BandChart = function(data, {
 
 						tooltip.append("div")
 							.style("max-width", "200px")
+							.style("margin-bottom", annotation.prs ? "8px" : "0")
 							.text(annotation.description);
+
+						// Add PR links if they exist
+						if (annotation.prs && annotation.prs.length > 0) {
+							const prContainer = tooltip.append("div")
+								.style("display", "flex")
+								.style("flex-wrap", "wrap")
+								.style("gap", "4px");
+
+							annotation.prs.forEach(pr => {
+								const prLink = prContainer.append("a")
+									.attr("href", `https://github.com/cockroachdb/cockroach/pull/${pr}`)
+									.attr("target", "_blank")
+									.style("color", "#00FF00")
+									.style("text-decoration", "none")
+									.style("pointer-events", "auto")
+									.style("background-color", "rgba(0, 255, 0, 0.1)")
+									.style("padding", "2px 6px")
+									.style("border-radius", "3px")
+									.text(`#${pr}`);
+
+								// Add hover effect
+								prLink.on("mouseover", function() {
+									d3.select(this)
+										.style("background-color", "rgba(0, 255, 0, 0.2)");
+								})
+								.on("mouseout", function() {
+									d3.select(this)
+										.style("background-color", "rgba(0, 255, 0, 0.1)");
+								});
+							});
+						}
 
 						// Position tooltip
 						const svgRect = svg.node().getBoundingClientRect();
