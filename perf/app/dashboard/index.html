@@ -337,6 +337,40 @@ async function addCharts(benchmarks, repository, commits) {
 
 		let item = document.createElement("div");
 		item.classList.add("Dashboard-grid-item");
+		if (bench.Regression) {
+			const p = document.createElement("p");
+			p.classList.add("Dashboard-regression-description");
+			const r = bench.Regression;
+			if (r.DeltaIndex >= 0) {
+				// Generate some text indicating the regression.
+				const rd = bench.Values[r.DeltaIndex];
+				const regression = (Math.abs(r.Change)*100).toFixed(2);
+				const shortCommit = rd.CommitHash.slice(0, 7);
+				let diffText = "regression";
+				let isRegression = true;
+				if (r.Change < 0) {
+					// Note: r.Change already has its sign flipped for HigherIsBetter.
+					// Positive always means regression, negative always means improvement.
+					diffText = "improvement";
+					isRegression = false;
+				}
+				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}${hasBaseline ? '&baseline=' + baselineValue : ''}#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
+
+				// Add a link to file a bug.
+				if (isRegression) {
+					const title = `affected: ${regression}% regression in ${bench.Name} ${bench.Unit} at ${shortCommit}`;
+					const body = `Discovered a regression in ${bench.Unit} of ${regression}% for benchmark ${bench.Name} at ${shortCommit}.\n\n<ADD MORE DETAILS>.`
+					let query = `?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=Performance`;
+					p.innerHTML += ` <a href="https://github.com/cockroachdb/cockroach/issues/new${query}">File an issue</a>.`;
+				} else {
+					// Include a grinning emoji if it's an improvement.
+					p.innerHTML += ` <span style="font-style: normal;">&#128513;</span>`;
+				}
+			} else {
+				p.textContent = `Not ranked because ${r.IgnoredBecause}.`;
+			}
+			item.appendChild(p);
+		}
 
 		// Get annotations for this benchmark
 		const benchmarkAnnotations = [

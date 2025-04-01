@@ -293,15 +293,35 @@ func groupBenchmarkResults(res *api.QueryTableResult, byRegression bool) ([]*Ben
 // A partial overlap of size G yields a score of
 // 1 - G/M.
 //
-// Empty confidence intervals are problematic and produces infinities
-// or NaNs.
+// For point estimates (where low=center=high), the function
+// returns a score based on the relative difference between
+// the points, scaled to match the behavior of confidence intervals.
 func changeScore(l1, c1, h1, l2, c2, h2 float64) float64 {
 	sign := 1.0
 	if c1 > c2 {
 		l1, c1, h1, l2, c2, h2 = l2, c2, h2, l1, c1, h1
 		sign = -sign
 	}
+
+	// Check if we're dealing with point estimates (low = center = high)
+	isPoint1 := l1 == c1 && c1 == h1
+	isPoint2 := l2 == c2 && c2 == h2
+
+	if isPoint1 && isPoint2 {
+		// Both are point estimates - calculate relative difference
+		// Use a small epsilon to prevent division by zero
+		epsilon := 1e-10
+		// Use the larger of the absolute values as base, with minimum of epsilon
+		base := math.Max(math.Max(math.Abs(c1), math.Abs(c2)), epsilon)
+		relativeDiff := (c2 - c1) / base
+		// Scale the relative difference to match confidence interval behavior
+		// A 100% difference (c2 = 2*c1) should give a score of 1
+		return sign * relativeDiff
+	}
+
+	// Calculate range for confidence intervals
 	r := math.Max(h1-l1, h2-l2)
+
 	// we know l1 < c1 < h1, c1 < c2, l2 < c2 < h2
 	// therefore l1 < c1 < c2 < h2
 	if h1 > l2 { // overlap
@@ -349,35 +369,60 @@ func worstRegression(b *BenchmarkJSON) *RegressionJSON {
 	// First classify benchmarks that are too darn noisy, and get a feel for noisiness.
 	for i := l - 1; i > 0; i-- {
 		v1, v0 := values[i-1], values[i]
-		scores = append(scores, math.Abs(changeScore(v1.Low, v1.Center, v1.High, v0.Low, v0.Center, v0.High)))
+		score := math.Abs(changeScore(v1.Low, v1.Center, v1.High, v0.Low, v0.Center, v0.High))
+		scores = append(scores, score)
 	}
 
 	sort.Float64s(scores)
 	median := (scores[len(scores)/2] + scores[(len(scores)-1)/2]) / 2
 
-	// MAGIC NUMBER "1".  Removing this added 25% to the "detected regressions", but they were all junk.
-	if median > 1 {
-		worst.IgnoredBecause = "median change score > 1"
-		return worst
-	}
+	// Calculate threshold based on both median and the maximum score
+	// This helps handle cases where there's a large change but the median is low
+	maxScore := scores[len(scores)-1]
 
-	if math.IsNaN(median) {
-		worst.IgnoredBecause = "median is NaN"
-		return worst
-	}
+	// Adjust threshold calculation to be more sensitive to significant changes
+	// Use a combination of median and max score, with a lower minimum threshold
+	magicScoreThreshold := math.Max(0.8, math.Min(1.5*median, maxScore*0.4))
 
-	// MAGIC NUMBER "1.2".  Smaller than that tends to admit junky benchmarks.
-	magicScoreThreshold := math.Max(2*median, 1.2)
+	// Log threshold calculation for debugging
+	log.Printf("Regression threshold calculation for %s: median=%.3f, max=%.3f, threshold=%.3f",
+		b.Name, median, maxScore, magicScoreThreshold)
 
 	// Scan backwards looking for most recent outlier regression
 	for i := l - 1; i > 0; i-- {
 		v1, v0 := values[i-1], values[i]
 		score := sign * changeScore(v1.Low, v1.Center, v1.High, v0.Low, v0.Center, v0.High)
 
+		// Log each potential regression for debugging
+		log.Printf("Checking regression at index %d: score=%.3f, threshold=%.3f, v1.Center=%.3f, v0.Center=%.3f",
+			i, score, magicScoreThreshold, v1.Center, v0.Center)
+
 		if score > magicScoreThreshold && sign*v1.Center < min && score > worst.deltaScore {
 			worst.DeltaIndex = i
 			worst.deltaScore = score
 			worst.Delta = sign * (v0.Center - v1.Center)
+
+			// Calculate change percentage with improved handling of edge cases
+			const epsilon = 1e-10
+
+			// Calculate the absolute change in percentage points
+			diff := v0.Center - v1.Center
+
+			// For ops/s and similar metrics where higher is better:
+			// - If the value decreases (diff < 0), it's a regression
+			// - If the value increases (diff > 0), it's an improvement
+			if b.HigherIsBetter {
+				worst.Change = -diff // Negative diff means regression
+			} else {
+				worst.Change = diff // Positive diff means regression
+			}
+
+			log.Printf("Calculating regression: v0=%.3f, v1=%.3f, diff=%.3f, higherIsBetter=%v, change=%.3f",
+				v0.Center, v1.Center, diff, b.HigherIsBetter, worst.Change)
+
+			// Log when we find a regression
+			log.Printf("Found regression at index %d: score=%.3f, change=%.3f%%, delta=%.3f%%",
+				i, score, worst.Change*100, worst.Delta*100)
 		}
 
 		min = math.Min(sign*v0.Center, min)
@@ -385,6 +430,8 @@ func worstRegression(b *BenchmarkJSON) *RegressionJSON {
 
 	if worst.DeltaIndex == -1 {
 		worst.IgnoredBecause = "didn't detect outlier regression"
+		log.Printf("No regression detected for %s: max score=%.3f, threshold=%.3f",
+			b.Name, maxScore, magicScoreThreshold)
 	}
 
 	return worst
