@@ -402,9 +402,6 @@ func worstRegression(b *BenchmarkJSON) *RegressionJSON {
 			worst.deltaScore = score
 			worst.Delta = sign * (v0.Center - v1.Center)
 
-			// Calculate change percentage with improved handling of edge cases
-			const epsilon = 1e-10
-
 			// Calculate the absolute change in percentage points
 			diff := v0.Center - v1.Center
 
@@ -504,14 +501,13 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	end = end.Add(24 * time.Hour)
 	start := end.Add(-24 * time.Hour * time.Duration(days))
 
 	// Calculate baseline start and end times if a baseline was specified
 	var baselineStart, baselineEnd time.Time
-	if baseline > 0 {
+	if baseline >= 0 {
 		baselineEnd = start
-		baselineStart = baselineEnd.Add(-24 * time.Hour * time.Duration(baseline))
+		baselineStart = baselineEnd.Add((-24 * time.Hour * time.Duration(baseline)) + (-24 * time.Hour * time.Duration(days)))
 		log.Printf("Query time ranges: Current period: %s to %s (%d days); Baseline period: %s to %s (%d days)",
 			start.Format(time.RFC3339),
 			end.Format(time.RFC3339),
@@ -637,16 +633,15 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 							// Get baseline data for this metric if needed
 							var metricBaselineData []byte
-							if baseline > 0 {
-								metricBaselineData, err = vmClient.Query(ctx, metricQuery, baselineStart, baselineEnd)
-								if err != nil {
-									log.Printf("Error querying baseline for metric %s: %v", metricName, err)
-									// Continue without baseline data
-								}
+
+							metricBaselineData, err = vmClient.Query(ctx, metricQuery, baselineStart, baselineEnd)
+							if err != nil {
+								log.Printf("Error querying baseline for metric %s: %v", metricName, err)
+								// Continue without baseline data
 							}
 
 							// Parse the response for this metric
-							metricBenchmarks, err := parseVictoriaMetricsResponse(metricData, baseline > 0, metricBaselineData)
+							metricBenchmarks, err := parseVictoriaMetricsResponse(metricData, true, metricBaselineData)
 							if err != nil {
 								log.Printf("Error parsing response for metric %s: %v", metricName, err)
 								continue
