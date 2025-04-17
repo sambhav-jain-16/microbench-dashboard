@@ -817,6 +817,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 					Goos          string `json:"goos"`
 					Goarch        string `json:"goarch"`
 					TeamCityRunID string `json:"test_run_id"`
+					Commit        string `json:"commit"`
 				} `json:"metric"`
 				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 			} `json:"result"`
@@ -836,6 +837,67 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 	// Log the response data for debugging
 	log.Printf("Response status: %s, result type: %s, result count: %d",
 		response.Status, response.Data.ResultType, len(response.Data.Result))
+
+	// First check if we have baseline data we can use for commit hashes
+	baselineCommitsByDate := make(map[string]string)
+
+	if hasBaseline && baselineData != nil {
+		// Parse baseline response to extract baseline commits
+		var baselineResponse struct {
+			Status string `json:"status"`
+			Data   struct {
+				ResultType string `json:"resultType"`
+				Result     []struct {
+					Metric struct {
+						Name          string `json:"__name__"`
+						Test          string `json:"test"`
+						Unit          string `json:"unit"`
+						Branch        string `json:"branch"`
+						Cloud         string `json:"cloud"`
+						TeamCityRunID string `json:"test_run_id"`
+						Commit        string `json:"commit"`
+					} `json:"metric"`
+					Values [][]interface{} `json:"values"`
+				} `json:"result"`
+			} `json:"data"`
+		}
+
+		if err := json.Unmarshal(baselineData, &baselineResponse); err == nil &&
+			baselineResponse.Status == "success" {
+
+			// Collect all baseline commits indexed by date
+			for _, result := range baselineResponse.Data.Result {
+				for _, v := range result.Values {
+					if len(v) != 2 {
+						continue
+					}
+
+					ts, ok := v[0].(float64)
+					if !ok {
+						continue
+					}
+
+					// Get commit hash from baseline
+					baselineCommit := ""
+					if result.Metric.Commit != "" {
+						baselineCommit = result.Metric.Commit
+					} else if result.Metric.TeamCityRunID != "" {
+						baselineCommit = extractTeamCityRunID(result.Metric.TeamCityRunID)
+					} else {
+						baselineCommit = "baseline-" + time.Unix(int64(ts), 0).Format("20060102")
+					}
+
+					// Store using date as key
+					dateKey := time.Unix(int64(ts), 0).Format("2006-01-02")
+					baselineCommitsByDate[dateKey] = baselineCommit
+				}
+			}
+
+			log.Printf("Collected %d baseline commits by date for regular data flow", len(baselineCommitsByDate))
+		} else if err != nil {
+			log.Printf("Error parsing baseline data for commit lookup: %v", err)
+		}
+	}
 
 	if len(response.Data.Result) == 0 {
 		log.Printf("No metrics found in VictoriaMetrics response")
@@ -873,6 +935,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 							Branch        string `json:"branch"`
 							Cloud         string `json:"cloud"`
 							TeamCityRunID string `json:"test_run_id"`
+							Commit        string `json:"commit"`
 						} `json:"metric"`
 						Values [][]interface{} `json:"values"`
 					} `json:"result"`
@@ -888,6 +951,40 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 				// Create benchmarks from baseline data
 				benchmarks := make([]*BenchmarkJSON, 0)
 
+				// Create a map of baseline commits by date for later lookup
+				baselineCommitsByDate := make(map[string]string)
+
+				// First pass: collect all baseline commits
+				for _, result := range baselineResponse.Data.Result {
+					for _, v := range result.Values {
+						if len(v) != 2 {
+							continue
+						}
+
+						ts, ok := v[0].(float64)
+						if !ok {
+							continue
+						}
+
+						// Get commit hash from baseline
+						baselineCommit := ""
+						if result.Metric.Commit != "" {
+							baselineCommit = result.Metric.Commit
+						} else if result.Metric.TeamCityRunID != "" {
+							baselineCommit = extractTeamCityRunID(result.Metric.TeamCityRunID)
+						} else {
+							baselineCommit = "baseline-" + time.Unix(int64(ts), 0).Format("20060102")
+						}
+
+						// Store using date as key
+						dateKey := time.Unix(int64(ts), 0).Format("2006-01-02")
+						baselineCommitsByDate[dateKey] = baselineCommit
+					}
+				}
+
+				log.Printf("Collected baseline commits for %d dates", len(baselineCommitsByDate))
+
+				// Second pass: create benchmarks with actual baseline commit hashes
 				for _, result := range baselineResponse.Data.Result {
 					if result.Metric.Test == "" || result.Metric.Unit == "" {
 						continue
@@ -926,21 +1023,32 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 							continue
 						}
 
-						// Use test_run_id as commit hash if available
-						commitHash := "baseline"
-						if result.Metric.TeamCityRunID != "" {
+						// Use commit field if available, then fallback to TeamCityRunID, then timestamp
+						commitHash := fmt.Sprintf("%d", int64(ts)) // Fallback to timestamp
+						if result.Metric.Commit != "" {
+							commitHash = result.Metric.Commit
+						} else if result.Metric.TeamCityRunID != "" {
 							commitHash = extractTeamCityRunID(result.Metric.TeamCityRunID)
+						}
+
+						// Look up baseline commit by date
+						dateKey := time.Unix(int64(ts), 0).Format("2006-01-02")
+						baselineCommitHash := baselineCommitsByDate[dateKey]
+						if baselineCommitHash == "" {
+							// If no baseline commit found, use a placeholder
+							baselineCommitHash = "baseline-" + dateKey
 						}
 
 						benchmark.Values = append(benchmark.Values, ValueJSON{
 							CommitDate:           time.Unix(int64(ts), 0),
 							CommitHash:           commitHash,
-							BaselineCommitHash:   "baseline",
+							BaselineCommitHash:   baselineCommitHash, // Use the actual baseline commit hash
 							BaselineCommitDate:   time.Unix(int64(ts), 0),
 							BenchmarksCommitHash: "benchmarks",
-							Low:                  value,
-							Center:               value,
-							High:                 value,
+
+							Low:    value, // Estimate confidence interval
+							Center: value,
+							High:   value, // Estimate confidence interval
 						})
 					}
 
@@ -1046,7 +1154,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 			benchmark.Values = append(benchmark.Values, ValueJSON{
 				CommitDate:           time.Unix(int64(ts), 0),
 				CommitHash:           commitHash,
-				BaselineCommitHash:   "baseline",
+				BaselineCommitHash:   commitHash, // Use the same commit hash as baseline
 				BaselineCommitDate:   time.Unix(int64(ts), 0),
 				BenchmarksCommitHash: "benchmarks",
 				Low:                  value, // Estimate confidence interval
@@ -1590,6 +1698,7 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 						Goos          string `json:"goos"`
 						Goarch        string `json:"goarch"`
 						TeamCityRunID string `json:"test_run_id"`
+						Commit        string `json:"commit"`
 					} `json:"metric"`
 					Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 				} `json:"result"`
@@ -1656,25 +1765,29 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
-				// Use test_run_id as commit hash if available
+				// Use commit field if available, then fallback to TeamCityRunID, then timestamp
 				commitHash := fmt.Sprintf("%d", int64(ts)) // Fallback to timestamp
-				if result.Metric.TeamCityRunID != "" {
+				if result.Metric.Commit != "" {
+					commitHash = result.Metric.Commit
+				} else if result.Metric.TeamCityRunID != "" {
 					commitHash = extractTeamCityRunID(result.Metric.TeamCityRunID)
 				}
 
+				// Generate a baseline commit hash based on date since we don't have actual baseline data here
+				baselineCommitHash := "baseline-" + time.Unix(int64(ts), 0).Format("2006-01-02")
+
 				// Create a ValueJSON with confidence intervals
-				valueJSON := ValueJSON{
+				benchmark.Values = append(benchmark.Values, ValueJSON{
 					CommitDate:           time.Unix(int64(ts), 0),
 					CommitHash:           commitHash,
-					BaselineCommitHash:   "baseline",
+					BaselineCommitHash:   baselineCommitHash, // Use a date-based baseline commit hash
 					BaselineCommitDate:   time.Unix(int64(ts), 0),
 					BenchmarksCommitHash: "benchmarks",
-					Low:                  value, // Estimate confidence interval
-					Center:               value,
-					High:                 value, // Estimate confidence interval
-				}
 
-				benchmark.Values = append(benchmark.Values, valueJSON)
+					Low:    value, // Estimate confidence interval
+					Center: value,
+					High:   value, // Estimate confidence interval
+				})
 			}
 
 			// Sort values by commit date
@@ -1763,26 +1876,40 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			// Calculate ratio and add confidence interval
 			ratio := point.Value / baselineAvg
 
-			// Get commit hash from test_run_id if available
+			// Get commit hash from current metric
 			commitHash := fmt.Sprintf("%d", point.Timestamp.Unix()) // Fallback to timestamp
-			if teamcityRunID, ok := point.Labels["test_run_id"]; ok && teamcityRunID != "" {
-				commitHash = extractTeamCityRunID(teamcityRunID)
+			if commit, ok := point.Labels["commit"]; ok && commit != "" {
+				commitHash = commit
+			}
+
+			// Get baseline commit hash from baseline metric if available
+			baselineCommitHash := commitHash // Default to current commit if no baseline
+			dayKey := point.Timestamp.Format("2006-01-02")
+
+			// Find matching baseline point by date
+			for _, baselinePoint := range baselinePoints {
+				if baselinePoint.Timestamp.Format("2006-01-02") == dayKey {
+					if commit, ok := baselinePoint.Labels["commit"]; ok && commit != "" {
+						baselineCommitHash = commit
+					}
+					break
+				}
 			}
 
 			// Create the value
 			value := ValueJSON{
 				CommitDate:           point.Timestamp,
 				CommitHash:           commitHash,
-				BaselineCommitHash:   "baseline",
+				BaselineCommitHash:   baselineCommitHash,
 				BaselineCommitDate:   point.Timestamp,
 				BenchmarksCommitHash: "benchmarks",
-				Low:                  ratio - 1, // 5% confidence interval
-				Center:               ratio - 1, // Convert from ratio to delta
-				High:                 ratio - 1, // 5% confidence interval
+				Low:                  ratio - 1,
+				Center:               ratio - 1,
+				High:                 ratio - 1,
 			}
 
 			// Use day as the key to avoid duplicates
-			dayKey := point.Timestamp.Format("2006-01-02")
+			dayKey = point.Timestamp.Format("2006-01-02")
 
 			// Only add if we don't already have a value for this day or if this value
 			// is later in the day than the one we already have
@@ -1849,6 +1976,7 @@ func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) 
 					Goos          string `json:"goos"`
 					Goarch        string `json:"goarch"`
 					TeamCityRunID string `json:"test_run_id"`
+					Commit        string `json:"commit"`
 				} `json:"metric"`
 				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 			} `json:"result"`
@@ -1972,6 +2100,7 @@ func createLabelsMap(metric struct {
 	Goos          string `json:"goos"`
 	Goarch        string `json:"goarch"`
 	TeamCityRunID string `json:"test_run_id"`
+	Commit        string `json:"commit"`
 }) map[string]string {
 	labels := make(map[string]string)
 	labels["__name__"] = metric.Name
@@ -1982,6 +2111,7 @@ func createLabelsMap(metric struct {
 	labels["goos"] = metric.Goos
 	labels["goarch"] = metric.Goarch
 	labels["test_run_id"] = metric.TeamCityRunID
+	labels["commit"] = metric.Commit
 	return labels
 }
 
