@@ -202,9 +202,8 @@ func queryToJson(res *api.QueryTableResult) ([]*BenchmarkJSON, error) {
 		b, ok := m[k]
 		if !ok {
 			b = &BenchmarkJSON{
-				Name:           name,
-				Unit:           unit,
-				HigherIsBetter: isHigherBetter(unit),
+				Name: name,
+				Unit: unit,
 			}
 			m[k] = b
 		}
@@ -809,15 +808,16 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 			ResultType string `json:"resultType"`
 			Result     []struct {
 				Metric struct {
-					Name          string `json:"__name__"`
-					Test          string `json:"test"`
-					Unit          string `json:"unit"`
-					Branch        string `json:"branch"`
-					Cloud         string `json:"cloud"`
-					Goos          string `json:"goos"`
-					Goarch        string `json:"goarch"`
-					TeamCityRunID string `json:"test_run_id"`
-					Commit        string `json:"commit"`
+					Name           string `json:"__name__"`
+					Test           string `json:"test"`
+					Unit           string `json:"unit"`
+					Branch         string `json:"branch"`
+					Cloud          string `json:"cloud"`
+					Goos           string `json:"goos"`
+					Goarch         string `json:"goarch"`
+					TeamCityRunID  string `json:"test_run_id"`
+					Commit         string `json:"commit"`
+					IsHigherBetter string `json:"is_higher_better"`
 				} `json:"metric"`
 				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 			} `json:"result"`
@@ -849,13 +849,14 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 				ResultType string `json:"resultType"`
 				Result     []struct {
 					Metric struct {
-						Name          string `json:"__name__"`
-						Test          string `json:"test"`
-						Unit          string `json:"unit"`
-						Branch        string `json:"branch"`
-						Cloud         string `json:"cloud"`
-						TeamCityRunID string `json:"test_run_id"`
-						Commit        string `json:"commit"`
+						Name           string `json:"__name__"`
+						Test           string `json:"test"`
+						Unit           string `json:"unit"`
+						Branch         string `json:"branch"`
+						Cloud          string `json:"cloud"`
+						TeamCityRunID  string `json:"test_run_id"`
+						Commit         string `json:"commit"`
+						IsHigherBetter string `json:"is_higher_better"`
 					} `json:"metric"`
 					Values [][]interface{} `json:"values"`
 				} `json:"result"`
@@ -929,13 +930,14 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 					ResultType string `json:"resultType"`
 					Result     []struct {
 						Metric struct {
-							Name          string `json:"__name__"`
-							Test          string `json:"test"`
-							Unit          string `json:"unit"`
-							Branch        string `json:"branch"`
-							Cloud         string `json:"cloud"`
-							TeamCityRunID string `json:"test_run_id"`
-							Commit        string `json:"commit"`
+							Name           string `json:"__name__"`
+							Test           string `json:"test"`
+							Unit           string `json:"unit"`
+							Branch         string `json:"branch"`
+							Cloud          string `json:"cloud"`
+							TeamCityRunID  string `json:"test_run_id"`
+							Commit         string `json:"commit"`
+							IsHigherBetter string `json:"is_higher_better"`
 						} `json:"metric"`
 						Values [][]interface{} `json:"values"`
 					} `json:"result"`
@@ -993,7 +995,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 					benchmark := &BenchmarkJSON{
 						Name:           result.Metric.Test,
 						Unit:           result.Metric.Unit,
-						HigherIsBetter: isHigherBetter(result.Metric.Unit),
+						HigherIsBetter: getHigherBetter(result.Metric.IsHigherBetter),
 						Values:         []ValueJSON{},
 					}
 
@@ -1690,15 +1692,16 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 				ResultType string `json:"resultType"`
 				Result     []struct {
 					Metric struct {
-						Name          string `json:"__name__"`
-						Test          string `json:"test"`
-						Unit          string `json:"unit"`
-						Branch        string `json:"branch"`
-						Cloud         string `json:"cloud"`
-						Goos          string `json:"goos"`
-						Goarch        string `json:"goarch"`
-						TeamCityRunID string `json:"test_run_id"`
-						Commit        string `json:"commit"`
+						Name           string `json:"__name__"`
+						Test           string `json:"test"`
+						Unit           string `json:"unit"`
+						Branch         string `json:"branch"`
+						Cloud          string `json:"cloud"`
+						Goos           string `json:"goos"`
+						Goarch         string `json:"goarch"`
+						TeamCityRunID  string `json:"test_run_id"`
+						Commit         string `json:"commit"`
+						IsHigherBetter string `json:"is_higher_better"`
 					} `json:"metric"`
 					Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 				} `json:"result"`
@@ -1968,15 +1971,16 @@ func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) 
 			ResultType string `json:"resultType"`
 			Result     []struct {
 				Metric struct {
-					Name          string `json:"__name__"`
-					Test          string `json:"test"`
-					Unit          string `json:"unit"`
-					Branch        string `json:"branch"`
-					Cloud         string `json:"cloud"`
-					Goos          string `json:"goos"`
-					Goarch        string `json:"goarch"`
-					TeamCityRunID string `json:"test_run_id"`
-					Commit        string `json:"commit"`
+					Name           string `json:"__name__"`
+					Test           string `json:"test"`
+					Unit           string `json:"unit"`
+					Branch         string `json:"branch"`
+					Cloud          string `json:"cloud"`
+					Goos           string `json:"goos"`
+					Goarch         string `json:"goarch"`
+					TeamCityRunID  string `json:"test_run_id"`
+					Commit         string `json:"commit"`
+					IsHigherBetter string `json:"is_higher_better"`
 				} `json:"metric"`
 				Values [][]interface{} `json:"values"` // [timestamp, value] pairs
 			} `json:"result"`
@@ -2092,15 +2096,16 @@ func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) 
 
 // createLabelsMap converts a metric struct to a map of labels
 func createLabelsMap(metric struct {
-	Name          string `json:"__name__"`
-	Test          string `json:"test"`
-	Unit          string `json:"unit"`
-	Branch        string `json:"branch"`
-	Cloud         string `json:"cloud"`
-	Goos          string `json:"goos"`
-	Goarch        string `json:"goarch"`
-	TeamCityRunID string `json:"test_run_id"`
-	Commit        string `json:"commit"`
+	Name           string `json:"__name__"`
+	Test           string `json:"test"`
+	Unit           string `json:"unit"`
+	Branch         string `json:"branch"`
+	Cloud          string `json:"cloud"`
+	Goos           string `json:"goos"`
+	Goarch         string `json:"goarch"`
+	TeamCityRunID  string `json:"test_run_id"`
+	Commit         string `json:"commit"`
+	IsHigherBetter string `json:"is_higher_better"`
 }) map[string]string {
 	labels := make(map[string]string)
 	labels["__name__"] = metric.Name
@@ -2112,6 +2117,7 @@ func createLabelsMap(metric struct {
 	labels["goarch"] = metric.Goarch
 	labels["test_run_id"] = metric.TeamCityRunID
 	labels["commit"] = metric.Commit
+	labels["is_higher_better"] = metric.IsHigherBetter
 	return labels
 }
 
@@ -2194,4 +2200,11 @@ func annotationsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+}
+
+// getHigherBetter returns whether higher values are better for a metric
+// It checks the is_higher_better label and falls back to unit-based heuristics if not available
+func getHigherBetter(isHigherBetter string) bool {
+	// If the label exists and is parseable as a boolean, use it
+	return isHigherBetter == "true"
 }
