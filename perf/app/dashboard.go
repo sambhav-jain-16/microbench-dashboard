@@ -471,19 +471,6 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse the baseline parameter (days to compare against)
-	baseline := uint64(45) // Default baseline of 45 days
-	baselineParam := r.FormValue("baseline")
-	if baselineParam != "" {
-		var err error
-		baseline, err = strconv.ParseUint(baselineParam, 10, 32)
-		if err != nil {
-			log.Printf("Error parsing baseline %q: %v", baselineParam, err)
-			http.Error(w, "baseline parameter must be a positive integer", http.StatusBadRequest)
-			return
-		}
-	}
-
 	end := time.Now()
 	endParam := r.FormValue("end")
 	if endParam != "" {
@@ -526,22 +513,15 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	// Parse baseline date
 	var baselineStart, baselineEnd time.Time
 	baselineDate := r.FormValue("baseline_date")
-	if baselineDate != "" {
-		var err error
-		baselineEnd, err = time.Parse("2006-01-02", baselineDate)
-		if err != nil {
-			log.Printf("Error parsing baseline_date %q: %v", baselineDate, err)
-			http.Error(w, "baseline_date parameter must be a date (YYYY-MM-DD)", http.StatusBadRequest)
-			return
-		}
-		baselineStart = baselineEnd.Add(-24 * time.Hour * time.Duration(days))
-		log.Printf("Using baseline date: %s", baselineDate)
-	} else {
-		// Fall back to the old baseline days approach for backward compatibility
-		baselineEnd = start
-		baselineStart = baselineEnd.Add((-24 * time.Hour * time.Duration(baseline)) + (-24 * time.Hour * time.Duration(days)))
-		log.Printf("Using baseline days: %d", baseline)
+
+	baselineStart, err := time.Parse("2006-01-02", baselineDate)
+	if err != nil {
+		log.Printf("Error parsing baseline_date %q: %v", baselineDate, err)
+		http.Error(w, "baseline_date parameter must be a date (YYYY-MM-DD)", http.StatusBadRequest)
+		return
 	}
+	baselineEnd = baselineStart.Add(24 * time.Hour)
+	log.Printf("Using baseline date: %s", baselineDate)
 
 	log.Printf("Query time ranges: Current period: %s to %s (%d days); Baseline period: %s to %s",
 		start.Format(time.RFC3339),
@@ -559,7 +539,6 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 	benchmark := r.FormValue("benchmark")
 	unit := r.FormValue("unit")
-	var err error
 
 	// First, try to get the list of available metrics
 	metricsURL := fmt.Sprintf("%s/api/v1/series", a.VictoriaMetricsURL)
@@ -749,9 +728,6 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 // parseVictoriaMetricsResponse parses the VictoriaMetrics response into BenchmarkJSON format
 func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []byte) ([]*BenchmarkJSON, error) {
-	// Default baseline days if not specified
-	baseline := uint64(45) // Default baseline of 45 days
-
 	// First try to use the benchfmt-based comparison if both current and baseline data are available
 	if hasBaseline && baselineData != nil {
 		// Try the new comparison method using benchfmt
@@ -1201,13 +1177,12 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 			benchmark.Values = append(benchmark.Values, ValueJSON{
 				CommitDate:           time.Unix(int64(ts), 0),
 				CommitHash:           commitHash,
-				BaselineCommitHash:   "baseline-" + time.Unix(int64(ts), 0).Format("20060102"),               // Use a date-based baseline commit hash
-				BaselineCommitDate:   time.Unix(int64(ts), 0).Add(-24 * time.Hour * time.Duration(baseline)), // Use a date offset for baseline
+				BaselineCommitHash:   commitHash, // Use the same commit hash as baseline
+				BaselineCommitDate:   time.Unix(int64(ts), 0),
 				BenchmarksCommitHash: "benchmarks",
-
-				Low:    value, // Estimate confidence interval
-				Center: value,
-				High:   value, // Estimate confidence interval
+				Low:                  value, // Estimate confidence interval
+				Center:               value,
+				High:                 value, // Estimate confidence interval
 			})
 		}
 	}
@@ -1829,8 +1804,8 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 				benchmark.Values = append(benchmark.Values, ValueJSON{
 					CommitDate:           time.Unix(int64(ts), 0),
 					CommitHash:           commitHash,
-					BaselineCommitHash:   baselineCommitHash,                                                     // Use a date-based baseline commit hash
-					BaselineCommitDate:   time.Unix(int64(ts), 0).Add(-24 * time.Hour * time.Duration(baseline)), // Use a date offset for baseline
+					BaselineCommitHash:   baselineCommitHash, // Use a date-based baseline commit hash
+					BaselineCommitDate:   time.Unix(int64(ts), 0),
 					BenchmarksCommitHash: "benchmarks",
 
 					Low:    value, // Estimate confidence interval
@@ -1878,6 +1853,8 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 		return nil, fmt.Errorf("no baseline metrics available for comparison")
 	}
 
+	// baselineCommitHash := baselineMetrics["__name__"][0].Labels["commit"]
+
 	log.Printf("Creating benchmark comparisons between %d current metrics and %d baseline metrics",
 		len(currentMetrics), len(baselineMetrics))
 
@@ -1885,6 +1862,7 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 	var benchmarks []*BenchmarkJSON
 	for metricKey, currentPoints := range currentMetrics {
 		baselinePoints, hasBaseline := baselineMetrics[metricKey]
+		baselineCommitHash := baselinePoints[0].Labels["commit"]
 		if !hasBaseline || len(currentPoints) == 0 || len(baselinePoints) == 0 {
 			continue // Skip metrics without baseline data or points
 		}
@@ -1929,36 +1907,18 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			commitHash := fmt.Sprintf("%d", point.Timestamp.Unix()) // Fallback to timestamp
 			if commit, ok := point.Labels["commit"]; ok && commit != "" {
 				commitHash = commit
+			} else if runID, ok := point.Labels["test_run_id"]; ok && runID != "" {
+				commitHash = extractTeamCityRunID(runID)
 			}
 
-			// Get baseline commit hash and date from baseline metric if available
-			baselineCommitHash := "baseline-" + point.Timestamp.Format("20060102") // Default to date-based baseline
-			baselineCommitDate := point.Timestamp                                  // Default to current date
-			dayKey := point.Timestamp.Format("2006-01-02")
+			baselineCommitDate := point.Timestamp // Default to current point's timestamp
 
-			// Find matching baseline point by date
-			for _, baselinePoint := range baselinePoints {
-				if baselinePoint.Timestamp.Format("2006-01-02") == dayKey {
-					// Use the actual baseline point's timestamp for the baseline commit date
-					baselineCommitDate = baselinePoint.Timestamp
-
-					// Use the actual baseline commit if available
-					if commit, ok := baselinePoint.Labels["commit"]; ok && commit != "" {
-						baselineCommitHash = commit
-					} else {
-						// Create a more descriptive baseline commit hash using the date
-						baselineCommitHash = "baseline-" + baselinePoint.Timestamp.Format("20060102")
-					}
-					break
-				}
-			}
-
-			// Create the value with properly differentiated commit information
+			// Create the value
 			value := ValueJSON{
 				CommitDate:           point.Timestamp,
 				CommitHash:           commitHash,
 				BaselineCommitHash:   baselineCommitHash,
-				BaselineCommitDate:   baselineCommitDate, // Use the actual baseline date
+				BaselineCommitDate:   baselineCommitDate,
 				BenchmarksCommitHash: "benchmarks",
 				Low:                  ratio - 1,
 				Center:               ratio - 1,
@@ -1966,7 +1926,7 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			}
 
 			// Use day as the key to avoid duplicates
-			dayKey = point.Timestamp.Format("2006-01-02")
+			dayKey := point.Timestamp.Format("2006-01-02")
 
 			// Only add if we don't already have a value for this day or if this value
 			// is later in the day than the one we already have
