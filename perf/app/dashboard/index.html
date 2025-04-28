@@ -122,6 +122,40 @@ license that can be found in the LICENSE file.
 			z-index: 50;
 			background: #fff;
 		}
+		
+		/* Baseline configuration styles */
+		.baseline-config {
+			margin-top: 10px;
+			padding: 10px;
+			background: #f8f8f8;
+			border-radius: 4px;
+		}
+		.baseline-label {
+			font-weight: bold;
+			color: #333;
+			margin-right: 10px;
+		}
+		.baseline-controls {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 15px;
+			margin-top: 5px;
+		}
+		.baseline-control {
+			display: flex;
+			align-items: center;
+			gap: 5px;
+		}
+		.baseline-control label {
+			font-weight: normal;
+			color: #666;
+		}
+		.baseline-control select,
+		.baseline-control input {
+			padding: 4px 8px;
+			border: 1px solid #ddd;
+			border-radius: 4px;
+		}
 	</style>
 </head>
 
@@ -187,12 +221,29 @@ license that can be found in the LICENSE file.
 							<div class="Dashboard-duration">
 								<input id="days-input" type="number" name="days" value="90" />
 							</div>
-							Baseline (days):
-							<div class="Dashboard-baseline">
-								<input id="baseline-input" type="number" name="baseline" value="45" />
-							</div>
 							End (UTC): <input id="end-input" type="date" name="end" />
 							<input type="submit">
+						</li>
+						<li class="baseline-config">
+							<span class="baseline-label">Baseline Configuration:</span>
+							<div class="baseline-controls">
+								<div class="baseline-control">
+									<label for="baseline-cloud-select">Cloud:</label>
+									<select id="baseline-cloud-select" name="baseline_cloud">
+										<option value="gce">GCE</option>
+										<option value="aws">AWS</option>
+										<option value="azure">Azure</option>
+									</select>
+								</div>
+								<div class="baseline-control">
+									<label for="baseline-branch-select">Branch:</label>
+									<select id="baseline-branch-select" name="baseline_branch"></select>
+								</div>
+								<div class="baseline-control">
+									<label for="baseline-date-input">Date (UTC):</label>
+									<input id="baseline-date-input" type="date" name="baseline_date" />
+								</div>
+							</div>
 						</li>
 					</ul>
 				</form>
@@ -218,11 +269,10 @@ license that can be found in the LICENSE file.
 				as each graph's title, i.e. "sec/op".
 			</p>
 			<p>
-				<strong>Baseline Comparison:</strong> You can compare metrics against a historical baseline by adjusting the "Baseline" field (default: 45 days). 
-				When a baseline is set, each data point is compared to the same metric from the baseline period. The dashboard calculates this comparison locally—baseline
-				is not a label in VictoriaMetrics but rather a way to compare current metrics against historical data.
-				With Duration=90 and Baseline=45, each data point will be compared to its value from 45 days before the start of the 90-day window.
-				Positive values indicate regressions, negative values indicate improvements. This is particularly useful for identifying performance trends over time.
+				<strong>Baseline Comparison:</strong> You can compare metrics against a baseline configuration by setting the baseline cloud, branch, and date. 
+				When a baseline is set, each data point is compared to the same metric from the specified baseline configuration. 
+				The dashboard calculates this comparison locally to provide immediate visual feedback on performance trends over time.
+				This is particularly useful for identifying performance differences between branches or cloud environments.
 			</p>
 		</div>
 
@@ -292,10 +342,9 @@ async function addCharts(benchmarks, repository, commits) {
 		await fetchAnnotations();
 	}
 
-	// Check if baseline comparison is active
+	// Get current URL parameters
 	const urlParams = new URLSearchParams(window.location.search);
-	const hasBaseline = urlParams.has('baseline') && urlParams.get('baseline') !== "0";
-	const baselineValue = urlParams.get('baseline');
+	const hasBaseline = urlParams.has('baseline_date');
 
 	let prevName = "";
 	let grid = null;
@@ -311,7 +360,10 @@ async function addCharts(benchmarks, repository, commits) {
 			dashboard.appendChild(section);
 
 			let link = document.createElement("a");
-			link.href = "?benchmark=" + bench.Name + (hasBaseline ? "&baseline=" + baselineValue : "");
+			// Create URL with all current parameters
+			const linkParams = new URLSearchParams(window.location.search);
+			linkParams.set("benchmark", bench.Name);
+			link.href = `?${linkParams.toString()}`;
 			link.textContent = bench.Name;
 
 			let title = document.createElement("h2");
@@ -320,8 +372,18 @@ async function addCharts(benchmarks, repository, commits) {
 
 			// Add baseline indicator if applicable
 			if (hasBaseline) {
+				const baselineCloud = urlParams.get('baseline_cloud');
+				const baselineBranch = urlParams.get('baseline_branch');
+				const baselineDate = urlParams.get('baseline_date');
+				
+				let baselineText = ` (baseline: `;
+				if (baselineBranch) baselineText += `${baselineBranch} `;
+				if (baselineCloud) baselineText += `on ${baselineCloud} `;
+				if (baselineDate) baselineText += `at ${baselineDate}`;
+				baselineText += `)`;
+				
 				let baselineIndicator = document.createElement("span");
-				baselineIndicator.textContent = ` (showing ${baselineValue}-day baseline comparison)`;
+				baselineIndicator.textContent = baselineText;
 				baselineIndicator.style.fontSize = "smaller";
 				baselineIndicator.style.fontWeight = "normal";
 				baselineIndicator.style.fontStyle = "italic";
@@ -354,7 +416,17 @@ async function addCharts(benchmarks, repository, commits) {
 					diffText = "improvement";
 					isRegression = false;
 				}
-				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}${hasBaseline ? '&baseline=' + baselineValue : ''}#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
+				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}`;
+				
+				// Add baseline parameters if present
+				const baselineCloud = urlParams.get('baseline_cloud');
+				const baselineBranch = urlParams.get('baseline_branch');
+				const baselineDate = urlParams.get('baseline_date');
+				if (baselineCloud) p.innerHTML += `&baseline_cloud=${baselineCloud}`;
+				if (baselineBranch) p.innerHTML += `&baseline_branch=${baselineBranch}`;
+				if (baselineDate) p.innerHTML += `&baseline_date=${baselineDate}`;
+				
+				p.innerHTML += `#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
 
 				// Add a link to file a bug.
 				if (isRegression) {
@@ -474,14 +546,20 @@ function addTable(bench, unit, repository, commits) {
 
 		const link = document.createElement("a");
 
-		// Get baseline days from URL parameter or use default
+		// Get baseline parameters from URL
 		const urlParams = new URLSearchParams(window.location.search);
-		const baselineDays = parseInt(urlParams.get('baseline') || '45', 10);
+		const baselineDate = urlParams.get('baseline_date');
 		
-		// Calculate baseline timestamp (default to 45 days before current timestamp)
-		const baselineDate = new Date(timestamp.getTime() - baselineDays * 24 * 60 * 60 * 1000);
+		// Calculate baseline timestamp
+		let baselineTimestamp;
+		if (baselineDate) {
+			baselineTimestamp = new Date(baselineDate).getTime();
+		} else {
+			// Fallback to default (45 days before)
+			baselineTimestamp = timestamp.getTime() - 45 * 24 * 60 * 60 * 1000;
+		}
 		
-		const from = Math.floor(baselineDate.getTime());
+		const from = Math.floor(baselineTimestamp);
 		const to = Math.floor(timestamp.getTime());
 		
 		// Create URL with appropriate parameters for side-by-side comparison
@@ -491,7 +569,18 @@ function addTable(bench, unit, repository, commits) {
 		params.set("to", to);
 		params.set("var-test", testName);
 		params.set("var-benchmark", testName); // Add both as some dashboards might use either
-		params.set("var-cloud", cloudProvider); // Add cloud provider
+		
+		// Add cloud provider parameters
+		const currentCloud = urlParams.get('cloud') || 'gce';
+		const baselineCloud = urlParams.get('baseline_cloud') || currentCloud;
+		params.set("var-cloud", currentCloud);
+		params.set("var-baseline_cloud", baselineCloud);
+		
+		// Add branch parameters if available
+		const currentBranch = urlParams.get('branch');
+		const baselineBranch = urlParams.get('baseline_branch');
+		if (currentBranch) params.set("var-branch", currentBranch);
+		if (baselineBranch) params.set("var-baseline_branch", baselineBranch);
 		
 		// Construct the URL
 		link.href = `${window.grafanaURL}/d/benchmark-comparison/cockroach-benchmark-comparison?${params.toString()}`;
@@ -507,6 +596,8 @@ function addTable(bench, unit, repository, commits) {
 	const header = document.createElement("tr");
 	header.appendChild(createCell("Date", true));
 	header.appendChild(createCell("Delta", true));
+	header.appendChild(createCell("Current Commit", true));
+	header.appendChild(createCell("Baseline Commit", true));
 	header.appendChild(createCell("Grafana Comparison", true));
 	table.appendChild(header);
 
@@ -638,6 +729,28 @@ function addTable(bench, unit, repository, commits) {
 			range.classList.add("Dashboard-table-range");
 			row.appendChild(range);
 
+			// Current commit cell
+			const currentCommitCell = createCell("", false);
+			const currentCommitLink = document.createElement("a");
+			currentCommitLink.href = "https://github.com/cockroachdb/cockroach/commit/" + v.CommitHash;
+			currentCommitLink.textContent = v.CommitHash.slice(0, 7);
+			currentCommitLink.title = v.CommitHash;
+			currentCommitCell.appendChild(currentCommitLink);
+			row.appendChild(currentCommitCell);
+
+			// Baseline commit cell
+			const baselineCommitCell = createCell("", false);
+			if (v.BaselineCommitHash) {
+				const baselineCommitLink = document.createElement("a");
+				baselineCommitLink.href = "https://github.com/cockroachdb/cockroach/commit/" + v.BaselineCommitHash;
+				baselineCommitLink.textContent = v.BaselineCommitHash.slice(0, 7);
+				baselineCommitLink.title = v.BaselineCommitHash;
+				baselineCommitCell.appendChild(baselineCommitLink);
+			} else {
+				baselineCommitCell.textContent = "N/A";
+			}
+			row.appendChild(baselineCommitCell);
+
 			// Grafana link cell
 			const grafanaCell = createGrafanaLink(bench.Name, c.Date);
 			row.appendChild(grafanaCell);
@@ -670,6 +783,14 @@ function addTable(bench, unit, repository, commits) {
 			}
 			range.classList.add("Dashboard-table-range");
 			row.appendChild(range);
+
+			// Empty current commit cell
+			const currentCommitCell = createCell("N/A", false);
+			row.appendChild(currentCommitCell);
+
+			// Empty baseline commit cell
+			const baselineCommitCell = createCell("N/A", false);
+			row.appendChild(baselineCommitCell);
 
 			// Grafana link cell
 			const grafanaCell = createGrafanaLink(bench.Name, c.Date);
@@ -789,12 +910,6 @@ function prefillSearch(formFields) {
 		input.value = days;
 	}
 	
-	let baseline = params.get('baseline');
-	if (baseline) {
-		let input = document.getElementById('baseline-input');
-		input.value = baseline;
-	}
-
 	let end = params.get('end');
 	let input = document.getElementById('end-input');
 	if (end) {
@@ -806,6 +921,47 @@ function prefillSearch(formFields) {
 		const month = String(today.getUTCMonth() + 1).padStart(2, '0');
 		const day = String(today.getUTCDate()).padStart(2, '0');
 		input.value = `${year}-${month}-${day}`;
+	}
+	
+	// Handle baseline parameters
+	let baselineCloud = params.get('baseline_cloud');
+	if (baselineCloud) {
+		let select = document.getElementById('baseline-cloud-select');
+		select.value = baselineCloud;
+	} else {
+		// Default to same cloud as main selection
+		document.getElementById('baseline-cloud-select').value = 
+			document.getElementById('cloud-select').value;
+	}
+	
+	let baselineBranch = params.get('baseline_branch');
+	if (baselineBranch) {
+		let select = document.getElementById('baseline-branch-select');
+		if (baselineBranch === "latest-release") {
+			select.value = formFields.LatestReleaseBranch;
+		} else {
+			select.value = baselineBranch;
+		}
+	} else {
+		// Default to same branch as main selection if not specified
+		let mainBranch = document.getElementById('branch-select').value;
+		document.getElementById('baseline-branch-select').value = mainBranch;
+	}
+	
+	let baselineDate = params.get('baseline_date');
+	let baselineDateInput = document.getElementById('baseline-date-input');
+	if (baselineDate) {
+		baselineDateInput.value = baselineDate;
+	} else {
+		// Default to 45 days before end date
+		const endDate = new Date(input.value);
+		const defaultBaselineDate = new Date(endDate);
+		defaultBaselineDate.setDate(defaultBaselineDate.getDate() - 45);
+		
+		const year = defaultBaselineDate.getUTCFullYear();
+		const month = String(defaultBaselineDate.getUTCMonth() + 1).padStart(2, '0');
+		const day = String(defaultBaselineDate.getUTCDate()).padStart(2, '0');
+		baselineDateInput.value = `${year}-${month}-${day}`;
 	}
 }
 fetch('./formfields.json')
@@ -823,6 +979,16 @@ fetch('./formfields.json')
 			opt.innerText = formFields.Branches[i];
 			select.appendChild(opt);
 		}
+		
+		// Also populate baseline branch select with the same options
+		let baselineSelect = document.getElementById('baseline-branch-select');
+		for (const i in formFields.Branches) {
+			var opt = document.createElement('option');
+			opt.value = formFields.Branches[i];
+			opt.innerText = formFields.Branches[i];
+			baselineSelect.appendChild(opt);
+		}
+		
 		prefillSearch(formFields);
 	});
 
@@ -880,11 +1046,7 @@ fetch(dataURL)
 let unitLinkParams = new URLSearchParams(window.location.search);
 unitLinkParams.set("unit", unit);
 unitLinkParams.set("benchmark", benchmark);
-// Preserve baseline parameter if it exists
-const urlParams = new URLSearchParams(window.location.search);
-if (urlParams.has('baseline')) {
-	unitLinkParams.set("baseline", urlParams.get('baseline'));
-}
+// The rest of the parameters will be preserved automatically
 
 // Sidebar functionality
 function fetchTestsForSidebar() {
@@ -918,7 +1080,11 @@ function populateSidebar(tests) {
     const cloud = urlParams.get('cloud') || 'gce';
     const branch = urlParams.get('branch') || 'master';
     const days = urlParams.get('days') || '90';
-    const baseline = urlParams.get('baseline') || '45';
+    
+    // Get baseline parameters
+    const baselineCloud = urlParams.get('baseline_cloud') || cloud;
+    const baselineBranch = urlParams.get('baseline_branch') || branch;
+    const baselineDate = urlParams.get('baseline_date') || '';
     
     tests.forEach(test => {
         const item = document.createElement('div');
@@ -926,7 +1092,16 @@ function populateSidebar(tests) {
         
         const link = document.createElement('a');
         // Create link with current parameters preserved
-        link.href = `?benchmark=${encodeURIComponent(test)}&cloud=${cloud}&branch=${branch}&days=${days}&baseline=${baseline}`;
+        const linkParams = new URLSearchParams();
+        linkParams.set('benchmark', test);
+        linkParams.set('cloud', cloud);
+        linkParams.set('branch', branch);
+        linkParams.set('days', days);
+        if (baselineCloud) linkParams.set('baseline_cloud', baselineCloud);
+        if (baselineBranch) linkParams.set('baseline_branch', baselineBranch);
+        if (baselineDate) linkParams.set('baseline_date', baselineDate);
+        
+        link.href = `?${linkParams.toString()}`;
         link.textContent = test;
         link.title = test; // Show full name on hover
         
