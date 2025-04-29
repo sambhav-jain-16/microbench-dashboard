@@ -595,9 +595,9 @@ function addTable(bench, unit, repository, commits) {
 	// Create the header.
 	const header = document.createElement("tr");
 	header.appendChild(createCell("Date", true));
-	header.appendChild(createCell("Delta", true));
 	header.appendChild(createCell("Current Commit", true));
 	header.appendChild(createCell("Baseline Commit", true));
+	header.appendChild(createCell("Delta", true));
 	header.appendChild(createCell("Grafana Comparison", true));
 	table.appendChild(header);
 
@@ -702,6 +702,28 @@ function addTable(bench, unit, repository, commits) {
 			const v = valuesByCommit[c.Hash];
 			console.log("Using value:", v);
 
+			// Current commit cell
+			const currentCommitCell = createCell("", false);
+			const currentCommitLink = document.createElement("a");
+			currentCommitLink.href = "https://github.com/cockroachdb/cockroach/commit/" + v.CommitHash;
+			currentCommitLink.textContent = v.CommitHash.slice(0, 7);
+			currentCommitLink.title = v.CommitHash;
+			currentCommitCell.appendChild(currentCommitLink);
+			row.appendChild(currentCommitCell);
+
+			// Baseline commit cell
+			const baselineCommitCell = createCell("", false);
+			if (v.BaselineCommitHash) {
+				const baselineCommitLink = document.createElement("a");
+				baselineCommitLink.href = "https://github.com/cockroachdb/cockroach/commit/" + v.BaselineCommitHash;
+				baselineCommitLink.textContent = v.BaselineCommitHash.slice(0, 7);
+				baselineCommitLink.title = v.BaselineCommitHash;
+				baselineCommitCell.appendChild(baselineCommitLink);
+			} else {
+				baselineCommitCell.textContent = "N/A";
+			}
+			row.appendChild(baselineCommitCell);
+
 			// Delta cell
 			const range = createCell("", false);
 			try {
@@ -728,28 +750,6 @@ function addTable(bench, unit, repository, commits) {
 			}
 			range.classList.add("Dashboard-table-range");
 			row.appendChild(range);
-
-			// Current commit cell
-			const currentCommitCell = createCell("", false);
-			const currentCommitLink = document.createElement("a");
-			currentCommitLink.href = "https://github.com/cockroachdb/cockroach/commit/" + v.CommitHash;
-			currentCommitLink.textContent = v.CommitHash.slice(0, 7);
-			currentCommitLink.title = v.CommitHash;
-			currentCommitCell.appendChild(currentCommitLink);
-			row.appendChild(currentCommitCell);
-
-			// Baseline commit cell
-			const baselineCommitCell = createCell("", false);
-			if (v.BaselineCommitHash) {
-				const baselineCommitLink = document.createElement("a");
-				baselineCommitLink.href = "https://github.com/cockroachdb/cockroach/commit/" + v.BaselineCommitHash;
-				baselineCommitLink.textContent = v.BaselineCommitHash.slice(0, 7);
-				baselineCommitLink.title = v.BaselineCommitHash;
-				baselineCommitCell.appendChild(baselineCommitLink);
-			} else {
-				baselineCommitCell.textContent = "N/A";
-			}
-			row.appendChild(baselineCommitCell);
 
 			// Grafana link cell
 			const grafanaCell = createGrafanaLink(bench.Name, c.Date);

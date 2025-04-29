@@ -8,13 +8,11 @@ import (
 	"compress/gzip"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net/http"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,8 +20,6 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"github.com/influxdata/influxdb-client-go/v2/api"
-	"github.com/influxdata/influxdb-client-go/v2/api/query"
 	"golang.org/x/build/third_party/bandchart"
 	"gopkg.in/yaml.v3"
 )
@@ -105,65 +101,6 @@ type ValueJSON struct {
 	High   float64
 }
 
-func fluxRecordToValue(rec *query.FluxRecord) (ValueJSON, error) {
-	low, ok := rec.ValueByKey("low").(float64)
-	if !ok {
-		return ValueJSON{}, fmt.Errorf("record %s low value got type %T want float64", rec, rec.ValueByKey("low"))
-	}
-
-	center, ok := rec.ValueByKey("center").(float64)
-	if !ok {
-		return ValueJSON{}, fmt.Errorf("record %s center value got type %T want float64", rec, rec.ValueByKey("center"))
-	}
-
-	high, ok := rec.ValueByKey("high").(float64)
-	if !ok {
-		return ValueJSON{}, fmt.Errorf("record %s high value got type %T want float64", rec, rec.ValueByKey("high"))
-	}
-
-	commit, ok := rec.ValueByKey("experiment-commit").(string)
-	if !ok {
-		return ValueJSON{}, fmt.Errorf("record %s experiment-commit value got type %T want float64", rec, rec.ValueByKey("experiment-commit"))
-	}
-
-	baselineCommit, ok := rec.ValueByKey("baseline-commit").(string)
-	if !ok {
-		return ValueJSON{}, fmt.Errorf("record %s experiment-commit value got type %T want float64", rec, rec.ValueByKey("baseline-commit"))
-	}
-
-	benchmarksCommit, ok := rec.ValueByKey("benchmarks-commit").(string)
-	if !ok {
-		return ValueJSON{}, fmt.Errorf("record %s experiment-commit value got type %T want float64", rec, rec.ValueByKey("benchmarks-commit"))
-	}
-
-	return ValueJSON{
-		CommitDate:           rec.Time(),
-		CommitHash:           commit,
-		BaselineCommitHash:   baselineCommit,
-		BaselineCommitDate:   rec.Time(),
-		BenchmarksCommitHash: benchmarksCommit,
-		Low:                  low - 1,
-		Center:               center - 1,
-		High:                 high - 1,
-	}, nil
-}
-
-// validateRe is an allowlist of characters for a PromQL string literal
-var validateRe = regexp.MustCompile(`^[a-zA-Z0-9(),=/_:;.*-\[\]\\]*$`)
-
-func validatePromQLString(s string) error {
-	if !validateRe.MatchString(s) {
-		return fmt.Errorf("malformed value %q", s)
-	}
-	return nil
-}
-
-var errBenchmarkNotFound = errors.New("benchmark not found")
-
-func sanitizePromQLRegex(name string) string {
-	return strings.Replace(name, "/", "\\/", -1)
-}
-
 type RegressionJSON struct {
 	Change         float64 // endpoint regression, if any
 	DeltaIndex     int     // index at which largest increase of regression occurs
@@ -171,114 +108,6 @@ type RegressionJSON struct {
 	IgnoredBecause string
 
 	deltaScore float64 // score of that change (in 95%ile boxes)
-}
-
-// queryToJson process a QueryTableResult into a slice of BenchmarkJSON,
-// with that slice in no particular order (i.e., it needs to be sorted or
-// run-to-run results will vary).  For each benchmark in the slice, however,
-// results are sorted into commit-date order.
-func queryToJson(res *api.QueryTableResult) ([]*BenchmarkJSON, error) {
-	type key struct {
-		name string
-		unit string
-	}
-
-	m := make(map[key]*BenchmarkJSON)
-
-	for res.Next() {
-		rec := res.Record()
-
-		name, ok := rec.ValueByKey("name").(string)
-		if !ok {
-			return nil, fmt.Errorf("record %s name value got type %T want string", rec, rec.ValueByKey("name"))
-		}
-
-		unit, ok := rec.ValueByKey("unit").(string)
-		if !ok {
-			return nil, fmt.Errorf("record %s unit value got type %T want string", rec, rec.ValueByKey("unit"))
-		}
-
-		k := key{name, unit}
-		b, ok := m[k]
-		if !ok {
-			b = &BenchmarkJSON{
-				Name: name,
-				Unit: unit,
-			}
-			m[k] = b
-		}
-
-		v, err := fluxRecordToValue(res.Record())
-		if err != nil {
-			return nil, err
-		}
-
-		b.Values = append(b.Values, v)
-	}
-
-	s := make([]*BenchmarkJSON, 0, len(m))
-	for _, b := range m {
-		// Ensure that the benchmarks are commit-date ordered.
-		sort.Slice(b.Values, func(i, j int) bool {
-			return b.Values[i].CommitDate.Before(b.Values[j].CommitDate)
-		})
-		s = append(s, b)
-	}
-
-	return s, nil
-}
-
-// filterAndSortRegressions filters out benchmarks that didn't regress and sorts the
-// benchmarks in s so that those with the largest detectable regressions come first.
-func filterAndSortRegressions(s []*BenchmarkJSON) []*BenchmarkJSON {
-	// Compute per-benchmark estimates of point where the most interesting regression happened.
-	for _, b := range s {
-		b.Regression = worstRegression(b)
-		// TODO(mknyszek, drchase, mpratt): Filter out benchmarks once we're confident this
-		// algorithm works OK.
-	}
-
-	// Sort benchmarks with detectable regressions first, ordered by
-	// size of regression at end of sample.  Also sort the remaining
-	// benchmarks into end-of-sample regression order.
-	sort.Slice(s, func(i, j int) bool {
-		ri, rj := s[i].Regression, s[j].Regression
-		// regressions w/ a delta index come first
-		if (ri.DeltaIndex < 0) != (rj.DeltaIndex < 0) {
-			return rj.DeltaIndex < 0
-		}
-		if ri.Change != rj.Change {
-			// put larger regression first.
-			return ri.Change > rj.Change
-		}
-		if s[i].Name == s[j].Name {
-			return s[i].Unit < s[j].Unit
-		}
-		return s[i].Name < s[j].Name
-	})
-	return s
-}
-
-// groupBenchmarkResults groups all benchmark results from the passed query.
-// if byRegression is true, order the benchmarks with largest current regressions
-// with detectable points first.
-func groupBenchmarkResults(res *api.QueryTableResult, byRegression bool) ([]*BenchmarkJSON, error) {
-	s, err := queryToJson(res)
-	if err != nil {
-		return nil, err
-	}
-	if byRegression {
-		return filterAndSortRegressions(s), nil
-	}
-	// Keep benchmarks with the same name grouped together, which is
-	// assumed by the JS.
-	sort.Slice(s, func(i, j int) bool {
-		if s[i].Name == s[j].Name {
-			return s[i].Unit < s[j].Unit
-		}
-		return s[i].Name < s[j].Name
-	})
-	return s, nil
 }
 
 // changeScore returns an indicator of the change and direction.
@@ -639,27 +468,24 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 					// Get baseline data for this metric if needed
 					var metricBaselineData []byte
-					if baselineDate != "" {
-						// Use baseline configuration for the query
-						baselineQuery := strings.Replace(metricQuery,
-							fmt.Sprintf(`cloud="%s"`, cloud),
-							fmt.Sprintf(`cloud="%s"`, baselineCloud), 1)
-						baselineQuery = strings.Replace(baselineQuery,
-							fmt.Sprintf(`branch="%s"`, branch),
-							fmt.Sprintf(`branch="%s"`, baselineBranch), 1)
 
-						metricBaselineData, err = vmClient.Query(ctx, baselineQuery, baselineStart, baselineEnd)
-						if err != nil {
-							log.Printf("Error querying baseline for metric %s: %v", metricName, err)
-							// Continue without baseline data
-						}
-					} else {
-						// Use the old baseline days approach
-						metricBaselineData, err = vmClient.Query(ctx, metricQuery, baselineStart, baselineEnd)
-						if err != nil {
-							log.Printf("Error querying baseline for metric %s: %v", metricName, err)
-							// Continue without baseline data
-						}
+					// Use baseline configuration for the query
+					baselineQuery := strings.Replace(metricQuery,
+						fmt.Sprintf(`cloud="%s"`, cloud),
+						fmt.Sprintf(`cloud="%s"`, baselineCloud), 1)
+					baselineQuery = strings.Replace(baselineQuery,
+						fmt.Sprintf(`branch="%s"`, branch),
+						fmt.Sprintf(`branch="%s"`, baselineBranch), 1)
+
+					metricBaselineData, err = vmClient.Query(ctx, baselineQuery, baselineStart, baselineEnd)
+					if err != nil {
+						log.Printf("Error querying baseline for metric %s: %v", metricName, err)
+						// Continue without baseline data
+					} else if len(metricBaselineData) == 0 {
+						// Check if the baseline data is empty
+						log.Printf("No baseline metrics found for metric %s on baseline date %s", metricName, baselineDate)
+						http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
+						return
 					}
 
 					// Parse the response for this metric
@@ -1198,52 +1024,6 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 	}
 
 	return result, nil
-}
-
-// logBaselineStats logs statistics about baseline comparison matching to help with debugging
-func logBaselineStats(benchmarks []*BenchmarkJSON, baselineValues map[string]map[string]float64) {
-	matchCount := 0
-	totalPoints := 0
-
-	for _, benchmark := range benchmarks {
-		key := fmt.Sprintf("%s_%s", benchmark.Name, benchmark.Unit)
-		if baselineMap, ok := baselineValues[key]; ok {
-			// Count baseline matches for this benchmark
-			benchMatchCount := 0
-			for _, v := range benchmark.Values {
-				dateStr := v.CommitDate.Format("2006-01-02")
-				if _, hasMatch := baselineMap[dateStr]; hasMatch {
-					benchMatchCount++
-				}
-			}
-
-			matchRate := 0.0
-			if len(benchmark.Values) > 0 {
-				matchRate = float64(benchMatchCount) / float64(len(benchmark.Values)) * 100
-			}
-
-			log.Printf("Baseline stats for %s: %d/%d points matched (%.1f%%)",
-				key, benchMatchCount, len(benchmark.Values), matchRate)
-
-			matchCount += benchMatchCount
-			totalPoints += len(benchmark.Values)
-		} else {
-			log.Printf("No baseline data found for %s", key)
-			totalPoints += len(benchmark.Values)
-		}
-	}
-
-	// Log overall statistics
-	overallRate := 0.0
-	if totalPoints > 0 {
-		overallRate = float64(matchCount) / float64(totalPoints) * 100
-	}
-	log.Printf("Overall baseline match rate: %d/%d points (%.1f%%)",
-		matchCount, totalPoints, overallRate)
-
-	if matchCount == 0 && totalPoints > 0 {
-		log.Printf("WARNING: No baseline matches found! Check that the baseline period contains data.")
-	}
 }
 
 func commitsFromBenchmarks(benchmarks []*BenchmarkJSON) []Commit {
