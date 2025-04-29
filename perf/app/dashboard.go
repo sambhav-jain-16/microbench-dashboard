@@ -371,7 +371,8 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	vmClient := NewVictoriaMetricsClient(a.VictoriaMetricsURL)
 
 	benchmark := r.FormValue("benchmark")
-	unit := r.FormValue("unit")
+	metric := r.FormValue("unit")
+	metric = strings.Split(metric, " ")[0]
 
 	// First, try to get the list of available metrics
 	metricsURL := fmt.Sprintf("%s/api/v1/series", a.VictoriaMetricsURL)
@@ -442,12 +443,12 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 				for _, metricName := range metricNames {
 					var metricQuery string
-					if unit != "" {
+					if metric != "" {
 						// Specific benchmark and unit query
-						log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s, unit=%s",
-							metricName, benchmark, cloud, branch, unit)
-						metricQuery = fmt.Sprintf(`avg_over_time(%s{test="%s",cloud="%s",branch="%s",unit="%s"}[1d])`,
-							metricName, benchmark, cloud, branch, unit)
+						log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s",
+							metricName, benchmark, cloud, branch)
+						metricQuery = fmt.Sprintf(`avg_over_time(%s{test="%s",cloud="%s",branch="%s",unit!=""}[1d])`,
+							metric, benchmark, cloud, branch)
 					} else {
 						// Query for all units of this test
 						var benchmarkFilter string
@@ -517,6 +518,9 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 						}
 					} else {
 						log.Printf("No benchmarks found for metric %s", metricName)
+					}
+					if metric != "" {
+						break
 					}
 				}
 
@@ -841,6 +845,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 					benchmark := &BenchmarkJSON{
 						Name:           result.Metric.Test,
 						Unit:           result.Metric.Unit,
+						Metric:         result.Metric.Name,
 						HigherIsBetter: getHigherBetter(result.Metric.IsHigherBetter),
 						Values:         []ValueJSON{},
 					}
