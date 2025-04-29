@@ -491,6 +491,11 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 					// Parse the response for this metric
 					metricBenchmarks, err := parseVictoriaMetricsResponse(metricData, true, metricBaselineData)
 					if err != nil {
+						if err.Error() == "no baseline metrics found" {
+							log.Printf("No baseline metrics found for baseline date: %s", baselineDate)
+							http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
+							return
+						}
 						log.Printf("Error parsing response for metric %s: %v", metricName, err)
 						continue
 					}
@@ -561,72 +566,62 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 		currentMetrics, err := convertVMDataToMetricPoints(data)
 		if err == nil && len(currentMetrics) > 0 {
 			baselineMetrics, err := convertVMDataToMetricPoints(baselineData)
-			if err == nil && len(baselineMetrics) > 0 {
-				// Log metrics counts for debugging
-				log.Printf("Found %d current metrics and %d baseline metrics for benchfmt comparison",
-					len(currentMetrics), len(baselineMetrics))
+			if err != nil {
+				log.Printf("Error converting baseline data to metric points: %v", err)
+				return nil, fmt.Errorf("error converting baseline data: %w", err)
+			} else if len(baselineMetrics) == 0 {
+				// Check if the baseline data is empty
+				log.Printf("No baseline metrics found in VictoriaMetrics response")
+				return nil, fmt.Errorf("no baseline metrics found")
+			}
 
-				// Log all current metric keys and their point counts
-				log.Printf("Current metrics:")
-				for key, points := range currentMetrics {
-					log.Printf("  - %s: %d points", key, len(points))
-					if len(points) > 0 {
-						startTime := points[0].Timestamp.Format(time.RFC3339)
-						endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
-						log.Printf("    Time range: %s to %s", startTime, endTime)
-					}
+			// Log metrics counts for debugging
+			log.Printf("Found %d current metrics and %d baseline metrics for benchfmt comparison",
+				len(currentMetrics), len(baselineMetrics))
+
+			// Log all current metric keys and their point counts
+			log.Printf("Current metrics:")
+			for key, points := range currentMetrics {
+				log.Printf("  - %s: %d points", key, len(points))
+				if len(points) > 0 {
+					startTime := points[0].Timestamp.Format(time.RFC3339)
+					endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
+					log.Printf("    Time range: %s to %s", startTime, endTime)
+				}
+			}
+
+			// Log all baseline metric keys and their point counts
+			log.Printf("Baseline metrics:")
+			for key, points := range baselineMetrics {
+				log.Printf("  - %s: %d points", key, len(points))
+				if len(points) > 0 {
+					startTime := points[0].Timestamp.Format(time.RFC3339)
+					endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
+					log.Printf("    Time range: %s to %s", startTime, endTime)
+				}
+			}
+
+			// Try to create comparisons using the benchfmt approach
+			compBenchmarks, err := createBenchmarkComparisons(currentMetrics, baselineMetrics)
+			if err == nil && len(compBenchmarks) > 0 {
+				log.Printf("Successfully created %d benchmark comparisons using benchfmt", len(compBenchmarks))
+
+				// Log the comparisons created
+				for i, b := range compBenchmarks {
+					log.Printf("Comparison %d: %s (%s) with %d values",
+						i, b.Name, b.Unit, len(b.Values))
 				}
 
-				// Log all baseline metric keys and their point counts
-				log.Printf("Baseline metrics:")
-				for key, points := range baselineMetrics {
-					log.Printf("  - %s: %d points", key, len(points))
-					if len(points) > 0 {
-						startTime := points[0].Timestamp.Format(time.RFC3339)
-						endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
-						log.Printf("    Time range: %s to %s", startTime, endTime)
-					}
+				// Calculate regressions for each benchmark
+				for _, benchmark := range compBenchmarks {
+					benchmark.Regression = worstRegression(benchmark)
 				}
 
-				// Try to create comparisons using the benchfmt approach
-				compBenchmarks, err := createBenchmarkComparisons(currentMetrics, baselineMetrics)
-				if err == nil && len(compBenchmarks) > 0 {
-					log.Printf("Successfully created %d benchmark comparisons using benchfmt", len(compBenchmarks))
-
-					// Log the comparisons created
-					for i, b := range compBenchmarks {
-						log.Printf("Comparison %d: %s (%s) with %d values",
-							i, b.Name, b.Unit, len(b.Values))
-					}
-
-					// Calculate regressions for each benchmark
-					for _, benchmark := range compBenchmarks {
-						benchmark.Regression = worstRegression(benchmark)
-					}
-
-					return compBenchmarks, nil
-				} else if err != nil {
-					log.Printf("Error creating benchmark comparisons: %v", err)
-				} else {
-					log.Printf("No comparisons created with benchfmt method - no matching metrics between current and baseline")
-				}
+				return compBenchmarks, nil
+			} else if err != nil {
+				log.Printf("Error creating benchmark comparisons: %v", err)
 			} else {
-				if err != nil {
-					log.Printf("Error converting baseline data to metric points: %v", err)
-				} else {
-					log.Printf("No baseline metrics found in VictoriaMetrics response")
-
-					// Check for baseline data but empty results
-					if baselineData != nil {
-						var baselinePreview string
-						if len(baselineData) > 500 {
-							baselinePreview = string(baselineData[:500]) + "... [truncated]"
-						} else {
-							baselinePreview = string(baselineData)
-						}
-						log.Printf("Baseline data exists but no metrics extracted. Baseline data preview: %s", baselinePreview)
-					}
-				}
+				log.Printf("No comparisons created with benchfmt method - no matching metrics between current and baseline")
 			}
 		} else {
 			if err != nil {
