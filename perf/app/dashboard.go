@@ -80,6 +80,7 @@ type DataJSON struct {
 type BenchmarkJSON struct {
 	Name           string
 	Unit           string
+	Metric         string
 	HigherIsBetter bool
 
 	// These will be sorted by CommitDate.
@@ -1535,6 +1536,7 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 			benchmark := &BenchmarkJSON{
 				Name:           name,
 				Unit:           unit,
+				Metric:         result.Metric.Name,
 				HigherIsBetter: isHigherBetter(unit),
 				Values:         make([]ValueJSON, 0, len(result.Values)),
 			}
@@ -1664,6 +1666,7 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 		benchmark := &BenchmarkJSON{
 			Name:           currentPoints[0].Name,
 			Unit:           currentPoints[0].Unit,
+			Metric:         currentPoints[0].Metric,
 			HigherIsBetter: isHigherBetter(currentPoints[0].Unit),
 			Values:         make([]ValueJSON, 0, len(currentPoints)),
 		}
@@ -1741,6 +1744,7 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 type MetricPoint struct {
 	Name      string
 	Unit      string
+	Metric    string
 	Labels    map[string]string
 	Value     float64
 	Timestamp time.Time
@@ -1849,6 +1853,7 @@ func convertVMDataToMetricPoints(data []byte) (map[string][]MetricPoint, error) 
 			// Create a MetricPoint
 			point := MetricPoint{
 				Name:      testName,
+				Metric:    result.Metric.Name,
 				Unit:      unit,
 				Labels:    createLabelsMap(result.Metric), // Convert struct to map for compatibility
 				Value:     value,

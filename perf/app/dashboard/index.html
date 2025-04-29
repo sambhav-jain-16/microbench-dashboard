@@ -482,7 +482,7 @@ async function addCharts(benchmarks, repository, commits) {
 
 		item.appendChild(BandChart(bench.Values, {
 			benchmark: bench.Name,
-			unit: bench.Unit,
+			unit: bench.Metric + " (" + bench.Unit + ")",
 			cloud: cloudProvider,
 			minViewDeltaPercent: minViewDeltaPercent,
 			higherIsBetter: bench.HigherIsBetter,
