@@ -167,10 +167,6 @@ func changeScore(l1, c1, h1, l2, c2, h2 float64) float64 {
 	}
 }
 
-func isHigherBetter(unit string) bool {
-	return unit == "B/s" || strings.HasSuffix(unit, "ops/s") || strings.HasSuffix(unit, "ops/sec") || strings.HasSuffix(unit, "ops")
-}
-
 func worstRegression(b *BenchmarkJSON) *RegressionJSON {
 	values := b.Values
 	l := len(values)
@@ -959,7 +955,7 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 			benchmark = &BenchmarkJSON{
 				Name:           testName,
 				Unit:           unit,
-				HigherIsBetter: isHigherBetter(unit),
+				HigherIsBetter: getHigherBetter(result.Metric.IsHigherBetter),
 				Values:         []ValueJSON{},
 			}
 			benchmarks[metricKey] = benchmark
@@ -1542,7 +1538,7 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 				Name:           name,
 				Unit:           unit,
 				Metric:         result.Metric.Name,
-				HigherIsBetter: isHigherBetter(unit),
+				HigherIsBetter: getHigherBetter(result.Metric.IsHigherBetter),
 				Values:         make([]ValueJSON, 0, len(result.Values)),
 			}
 
@@ -1672,7 +1668,7 @@ func createBenchmarkComparisons(currentMetrics map[string][]MetricPoint, baselin
 			Name:           currentPoints[0].Name,
 			Unit:           currentPoints[0].Unit,
 			Metric:         currentPoints[0].Metric,
-			HigherIsBetter: isHigherBetter(currentPoints[0].Unit),
+			HigherIsBetter: getHigherBetter(currentPoints[0].Labels["is_higher_better"]),
 			Values:         make([]ValueJSON, 0, len(currentPoints)),
 		}
 
