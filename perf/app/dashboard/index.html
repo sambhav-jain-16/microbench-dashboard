@@ -406,7 +406,9 @@ async function addCharts(benchmarks, repository, commits) {
 			if (r.DeltaIndex >= 0) {
 				// Generate some text indicating the regression.
 				const rd = bench.Values[r.DeltaIndex];
-				const regression = (Math.abs(r.Change)*100).toFixed(2);
+				
+				// Format percentages consistently - the values are already in decimal form (0.2175 = 21.75%)
+				const regressionPercent = (Math.abs(r.Change)*100).toFixed(2);
 				const shortCommit = rd.CommitHash.slice(0, 7);
 				let diffText = "regression";
 				let isRegression = true;
@@ -416,27 +418,45 @@ async function addCharts(benchmarks, repository, commits) {
 					diffText = "improvement";
 					isRegression = false;
 				}
-				p.innerHTML = `${regression}% ${diffText}, ${(r.Delta*100).toFixed(2)}%-point change at <a href="?benchmark=${bench.Name}&unit=${bench.Unit}`;
 				
-				// Add baseline parameters if present
+				// Get baseline parameters
 				const baselineCloud = urlParams.get('baseline_cloud');
 				const baselineBranch = urlParams.get('baseline_branch');
 				const baselineDate = urlParams.get('baseline_date');
-				if (baselineCloud) p.innerHTML += `&baseline_cloud=${baselineCloud}`;
-				if (baselineBranch) p.innerHTML += `&baseline_branch=${baselineBranch}`;
-				if (baselineDate) p.innerHTML += `&baseline_date=${baselineDate}`;
 				
-				p.innerHTML += `#${commitToId(rd.CommitHash)}">${shortCommit}</a>.`;
+				// Generate the baseline parameter string
+				let baselineParams = '';
+				if (baselineCloud) baselineParams += `&baseline_cloud=${baselineCloud}`;
+				if (baselineBranch) baselineParams += `&baseline_branch=${baselineBranch}`;
+				if (baselineDate) baselineParams += `&baseline_date=${baselineDate}`;
+				
+				// Create the exact format seen in the screenshot
+				p.innerHTML = `${regressionPercent}% ${diffText} at commit <a href="?benchmark=${bench.Name}&unit=${bench.Unit}${baselineParams}#commit${rd.CommitHash}">${shortCommit}</a> <a href="#" class="file-issue">File an issue</a>`;
 
 				// Add a link to file a bug.
 				if (isRegression) {
-					const title = `affected: ${regression}% regression in ${bench.Name} ${bench.Unit} at ${shortCommit}`;
-					const body = `Discovered a regression in ${bench.Unit} of ${regression}% for benchmark ${bench.Name} at ${shortCommit}.\n\n<ADD MORE DETAILS>.`
+					const title = `affected: ${regressionPercent}% regression in ${bench.Name} ${bench.Unit} at ${shortCommit}`;
+					const body = `Discovered a regression in ${bench.Unit} of ${regressionPercent}% for benchmark ${bench.Name} at ${shortCommit}.\n\n<ADD MORE DETAILS>.`
 					let query = `?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=Performance`;
-					p.innerHTML += ` <a href="https://github.com/cockroachdb/cockroach/issues/new${query}">File an issue</a>.`;
+					
+					// Add click event for "File an issue" link
+					setTimeout(() => {
+						const fileIssueLink = p.querySelector('.file-issue');
+						if (fileIssueLink) {
+							fileIssueLink.href = `https://github.com/cockroachdb/cockroach/issues/new${query}`;
+						}
+					}, 0);
 				} else {
 					// Include a grinning emoji if it's an improvement.
 					p.innerHTML += ` <span style="font-style: normal;">&#128513;</span>`;
+					
+					// Remove the "File an issue" link for improvements
+					setTimeout(() => {
+						const fileIssueLink = p.querySelector('.file-issue');
+						if (fileIssueLink) {
+							fileIssueLink.parentNode.removeChild(fileIssueLink);
+						}
+					}, 0);
 				}
 			} else {
 				p.textContent = `Not ranked because ${r.IgnoredBecause}.`;

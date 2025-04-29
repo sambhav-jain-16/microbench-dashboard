@@ -228,26 +228,29 @@ func worstRegression(b *BenchmarkJSON) *RegressionJSON {
 		if score > magicScoreThreshold && sign*v1.Center < min && score > worst.deltaScore {
 			worst.DeltaIndex = i
 			worst.deltaScore = score
-			worst.Delta = sign * (v0.Center - v1.Center)
 
-			// Calculate the absolute change in percentage points
+			// Calculate the absolute change in percentage points (v0 - v1)
 			diff := v0.Center - v1.Center
 
-			// For ops/s and similar metrics where higher is better:
-			// - If the value decreases (diff < 0), it's a regression
-			// - If the value increases (diff > 0), it's an improvement
+			// Calculate the percent change relative to the baseline
+			// For non-percentage values, this will be a ratio
+			// We're already storing values as relative differences (e.g., -0.2 means 20% lower)
+			worst.Delta = diff
+
+			// The Change field is the same as Delta for display purposes
+			// For ops/s and similar metrics where higher is better, flip the sign
 			if b.HigherIsBetter {
-				worst.Change = -diff // Negative diff means regression
+				worst.Change = -diff // Negative diff means regression for higher-is-better metrics
 			} else {
-				worst.Change = diff // Positive diff means regression
+				worst.Change = diff // Positive diff means regression for lower-is-better metrics
 			}
 
 			log.Printf("Calculating regression: v0=%.3f, v1=%.3f, diff=%.3f, higherIsBetter=%v, change=%.3f",
 				v0.Center, v1.Center, diff, b.HigherIsBetter, worst.Change)
 
 			// Log when we find a regression
-			log.Printf("Found regression at index %d: score=%.3f, change=%.3f%%, delta=%.3f%%",
-				i, score, worst.Change*100, worst.Delta*100)
+			log.Printf("Found regression at index %d: score=%.3f, change=%.3f, delta=%.3f",
+				i, score, worst.Change, worst.Delta)
 		}
 
 		min = math.Min(sign*v0.Center, min)
