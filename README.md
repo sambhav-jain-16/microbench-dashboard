@@ -38,6 +38,7 @@ Or use the run script:
 
 1. Build the Docker image:
 ```bash
+gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
 make build-docker
 ```
 
