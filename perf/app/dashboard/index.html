@@ -1020,6 +1020,118 @@ const cloudProvider = document.getElementById('cloud-select').value;
 let benchmark = (new URLSearchParams(window.location.search)).get('benchmark');
 let unit = (new URLSearchParams(window.location.search)).get('unit');
 let dataURL = './data.json' + window.location.search; // Pass through all URL params.
+
+// Function to fetch and populate cloud options
+function fetchAndPopulateClouds(testName) {
+    if (!testName) return;
+    
+    fetch(`./clouds.json?test=${encodeURIComponent(testName)}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Failed to fetch clouds');
+            }
+            return response.json();
+        })
+        .then(data => {
+            const cloudSelect = document.getElementById('cloud-select');
+            const baselineCloudSelect = document.getElementById('baseline-cloud-select');
+            
+            // Clear existing options
+            cloudSelect.innerHTML = '';
+            baselineCloudSelect.innerHTML = '';
+            
+            // Add new options
+            data.labels.forEach(cloud => {
+                const opt = document.createElement('option');
+                opt.value = cloud;
+                opt.textContent = cloud;
+                cloudSelect.appendChild(opt);
+                
+                // Clone for baseline select
+                const baselineOpt = opt.cloneNode(true);
+                baselineCloudSelect.appendChild(baselineOpt);
+            });
+            
+            // Restore selected values if they exist in the new options
+            const urlParams = new URLSearchParams(window.location.search);
+            const selectedCloud = urlParams.get('cloud');
+            const selectedBaselineCloud = urlParams.get('baseline_cloud');
+            
+            if (selectedCloud && data.labels.includes(selectedCloud)) {
+                cloudSelect.value = selectedCloud;
+            }
+            if (selectedBaselineCloud && data.labels.includes(selectedBaselineCloud)) {
+                baselineCloudSelect.value = selectedBaselineCloud;
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching clouds:', error);
+        });
+}
+
+// Function to fetch and populate branch options
+function fetchAndPopulateBranches(testName) {
+    if (!testName) return;
+    
+    fetch(`./branches.json?test=${encodeURIComponent(testName)}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Failed to fetch branches');
+            }
+            return response.json();
+        })
+        .then(data => {
+            const branchSelect = document.getElementById('branch-select');
+            const baselineBranchSelect = document.getElementById('baseline-branch-select');
+            
+            // Clear existing options
+            branchSelect.innerHTML = '';
+            baselineBranchSelect.innerHTML = '';
+            
+            // Add new options
+            data.labels.forEach(branch => {
+                const opt = document.createElement('option');
+                opt.value = branch;
+                opt.textContent = branch;
+                branchSelect.appendChild(opt);
+                
+                // Clone for baseline select
+                const baselineOpt = opt.cloneNode(true);
+                baselineBranchSelect.appendChild(baselineOpt);
+            });
+            
+            // Restore selected values if they exist in the new options
+            const urlParams = new URLSearchParams(window.location.search);
+            const selectedBranch = urlParams.get('branch');
+            const selectedBaselineBranch = urlParams.get('baseline_branch');
+            
+            if (selectedBranch && data.labels.includes(selectedBranch)) {
+                branchSelect.value = selectedBranch;
+            }
+            if (selectedBaselineBranch && data.labels.includes(selectedBaselineBranch)) {
+                baselineBranchSelect.value = selectedBaselineBranch;
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching branches:', error);
+        });
+}
+
+// Update cloud and branch options when benchmark changes
+document.getElementById('benchmark-input').addEventListener('change', function() {
+    const testName = this.value;
+    if (testName) {
+        fetchAndPopulateClouds(testName);
+        fetchAndPopulateBranches(testName);
+    }
+});
+
+// Initial population if benchmark is provided
+if (benchmark) {
+    fetchAndPopulateClouds(benchmark);
+    fetchAndPopulateBranches(benchmark);
+}
+
 fetch(dataURL)
 	.then(response => {
 		if (!response.ok) {

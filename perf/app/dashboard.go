@@ -64,6 +64,8 @@ func (a *App) dashboardRegisterOnMux(mux *http.ServeMux) {
 	mux.HandleFunc("/dashboard/test_info.json", a.testInfo)
 	mux.HandleFunc("/dashboard/series_data.json", a.seriesDataToBenchmark)
 	mux.HandleFunc("/dashboard/annotations.json", annotationsHandler)
+	mux.HandleFunc("/dashboard/clouds.json", a.listClouds)
+	mux.HandleFunc("/dashboard/branches.json", a.listBranches)
 }
 
 // DataJSON is the result of accessing the data.json endpoint.
@@ -1799,4 +1801,157 @@ func annotationsHandler(w http.ResponseWriter, r *http.Request) {
 func getHigherBetter(isHigherBetter string) bool {
 	// If the label exists and is parseable as a boolean, use it
 	return isHigherBetter == "true"
+}
+
+// LabelsJSON is the response for the labels.json endpoint
+type LabelsJSON struct {
+	Labels []string `json:"labels"`
+}
+
+// listClouds handles the clouds.json endpoint, returning a list of available clouds for a test
+func (a *App) listClouds(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get the test name from the query parameters
+	testName := r.FormValue("test")
+	if testName == "" {
+		http.Error(w, "test parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Calculate the start time (1 year ago)
+	start := time.Now().Add(-365 * 24 * time.Hour)
+
+	// Construct the VictoriaMetrics query URL
+	url := fmt.Sprintf("%s/api/v1/label/cloud/values", a.VictoriaMetricsURL)
+
+	// Create the request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add query parameters
+	q := req.URL.Query()
+	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	q.Add("match[]", fmt.Sprintf(`{test="%s"}`, testName))
+	req.URL.RawQuery = q.Encode()
+
+	// Make the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics: %v", err)
+		http.Error(w, "Error querying VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		http.Error(w, "Error reading response", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the response
+	var vmResponse struct {
+		Status string   `json:"status"`
+		Data   []string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &vmResponse); err != nil {
+		log.Printf("Error parsing response: %v", err)
+		http.Error(w, "Error parsing response", http.StatusInternalServerError)
+		return
+	}
+
+	if vmResponse.Status != "success" {
+		log.Printf("Unexpected status from VictoriaMetrics: %s", vmResponse.Status)
+		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the clouds
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(LabelsJSON{Labels: vmResponse.Data}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+// listBranches handles the branches.json endpoint, returning a list of available branches for a test
+func (a *App) listBranches(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get the test name from the query parameters
+	testName := r.FormValue("test")
+	if testName == "" {
+		http.Error(w, "test parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Calculate the start time (1 year ago)
+	start := time.Now().Add(-365 * 24 * time.Hour)
+
+	// Construct the VictoriaMetrics query URL
+	url := fmt.Sprintf("%s/api/v1/label/branch/values", a.VictoriaMetricsURL)
+
+	// Create the request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add query parameters
+	q := req.URL.Query()
+	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	q.Add("match[]", fmt.Sprintf(`{test="%s"}`, testName))
+	req.URL.RawQuery = q.Encode()
+
+	// Make the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics: %v", err)
+		http.Error(w, "Error querying VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		http.Error(w, "Error reading response", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the response
+	var vmResponse struct {
+		Status string   `json:"status"`
+		Data   []string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &vmResponse); err != nil {
+		log.Printf("Error parsing response: %v", err)
+		http.Error(w, "Error parsing response", http.StatusInternalServerError)
+		return
+	}
+
+	if vmResponse.Status != "success" {
+		log.Printf("Unexpected status from VictoriaMetrics: %s", vmResponse.Status)
+		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the branches
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(LabelsJSON{Labels: vmResponse.Data}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
 }
