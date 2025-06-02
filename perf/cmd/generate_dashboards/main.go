@@ -343,6 +343,9 @@ func createSummaryPanel(metrics []map[string]string, testName string) []map[stri
 		if strings.Contains(testName, "tpccbench") {
 			expr += `, warehouses=~"$warehouses"`
 		}
+		if !strings.HasSuffix(name, "_count") {
+			expr += `, quantile="$quantile"`
+		}
 		expr += `})`
 
 		countMetrics++
