@@ -212,6 +212,7 @@ input[type=number] {
 }
 .Dashboard-table-range {
   width: 600px;
+  height: 48px;
 }
 .Dashboard-table-commit {
   width: 100px;

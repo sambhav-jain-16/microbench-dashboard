@@ -314,6 +314,33 @@ function removeLoadingMessage() {
 }
 
 let annotations = null;
+let dashboardIds = null;
+let grafanaBaseUrl = null;
+
+// Fetch dashboard IDs from YAML
+async function fetchDashboardIds() {
+	try {
+		// console.log('Fetching dashboard IDs...');
+		const response = await fetch('./grafana_dashboards.yaml');
+		if (!response.ok) {
+			throw new Error('Failed to fetch dashboard IDs');
+		}
+		const yamlText = await response.text();
+		// Parse YAML text into object
+		const lines = yamlText.split('\n');
+		dashboardIds = {};
+		lines.forEach(line => {
+			const [name, id] = line.split(':').map(s => s.trim());
+			if (name && id) {
+				dashboardIds[name] = id;
+			}
+		});
+		console.log('Successfully fetched dashboard IDs:', dashboardIds);
+	} catch (error) {
+		console.error('Error fetching dashboard IDs:', error);
+		dashboardIds = {};
+	}
+}
 
 // Fetch annotations from the server
 async function fetchAnnotations() {
@@ -335,6 +362,12 @@ async function addCharts(benchmarks, repository, commits) {
 	let dashboard = document.getElementById("dashboard");
 
 	removeLoadingMessage();
+
+	// Fetch dashboard IDs if not already fetched
+	if (!dashboardIds) {
+		console.log('Dashboard IDs not loaded yet, fetching...');
+		await fetchDashboardIds();
+	}
 
 	// Fetch annotations if not already fetched
 	if (!annotations) {
@@ -363,7 +396,12 @@ async function addCharts(benchmarks, repository, commits) {
 			// Create URL with all current parameters
 			const linkParams = new URLSearchParams(window.location.search);
 			linkParams.set("benchmark", bench.Name);
-			link.href = `?${linkParams.toString()}`;
+			const dashboardId = dashboardIds[bench.Name];
+			if (dashboardId) {
+				link.href = `${grafanaBaseUrl}/d/${dashboardId}`;
+			} else {
+				link.href = `?${linkParams.toString()}`;
+			}
 			link.textContent = bench.Name;
 
 			let title = document.createElement("h2");
@@ -508,12 +546,18 @@ function idToCommit(id) {
 	return null;
 }
 
-function addTable(bench, unit, repository, commits) {
+async function addTable(bench, unit, repository, commits) {
 	let commitSelected = idToCommit(window.location.hash.slice(1));
 	let dashboard = document.getElementById("dashboard");
 
 	removeLoadingMessage();
 	
+	// Fetch dashboard IDs if not already fetched
+	if (!dashboardIds) {
+		console.log('Dashboard IDs not loaded yet, fetching...');
+		await fetchDashboardIds();
+	}
+
 	console.log("Adding table for benchmark:", bench.Name, "with", bench.Values.length, "values and", commits.length, "commits");
 
 	let section = document.createElement("grid");
@@ -522,11 +566,17 @@ function addTable(bench, unit, repository, commits) {
 	dashboard.appendChild(section);
 
 	let link = document.createElement("h2");
-	link.textContent = bench.Name + " (" + unit + ")";
+	const dashboardId = dashboardIds[bench.Name];
+	if (dashboardId) {
+		link.innerHTML = `<a href="${grafanaBaseUrl}/d/${dashboardId}">${bench.Name} (${unit})</a>`;
+	} else {
+		link.textContent = bench.Name + " (" + unit + ")";
+	}
 
 	let title = document.createElement("h2");
 	title.classList.add("Dashboard-title");
 	title.appendChild(link);
+
 	section.appendChild(title);
 
 	const table = document.createElement("table");
@@ -553,72 +603,12 @@ function addTable(bench, unit, repository, commits) {
 		return commitHash;
 	}
 
-	// Create Grafana comparison link
-	const createGrafanaLink = function(testName, timestamp) {
-		const grafanaCell = createCell("", false);
-		grafanaCell.classList.add("grafana-link");
-		
-		if (!window.grafanaURL) {
-			grafanaCell.textContent = "Grafana URL not configured";
-			grafanaCell.title = "Configure the server with --grafana-url flag";
-			return grafanaCell;
-		}
-
-		const link = document.createElement("a");
-
-		// Get baseline parameters from URL
-		const urlParams = new URLSearchParams(window.location.search);
-		const baselineDate = urlParams.get('baseline_date');
-		
-		// Calculate baseline timestamp
-		let baselineTimestamp;
-		if (baselineDate) {
-			baselineTimestamp = new Date(baselineDate).getTime();
-		} else {
-			// Fallback to default (45 days before)
-			baselineTimestamp = timestamp.getTime() - 45 * 24 * 60 * 60 * 1000;
-		}
-		
-		const from = Math.floor(baselineTimestamp);
-		const to = Math.floor(timestamp.getTime());
-		
-		// Create URL with appropriate parameters for side-by-side comparison
-		const params = new URLSearchParams();
-		params.set("orgId", "1");
-		params.set("from", from);
-		params.set("to", to);
-		params.set("var-test", testName);
-		params.set("var-benchmark", testName); // Add both as some dashboards might use either
-		
-		// Add cloud provider parameters
-		const currentCloud = urlParams.get('cloud') || 'gce';
-		const baselineCloud = urlParams.get('baseline_cloud') || currentCloud;
-		params.set("var-cloud", currentCloud);
-		params.set("var-baseline_cloud", baselineCloud);
-		
-		// Add branch parameters if available
-		const currentBranch = urlParams.get('branch');
-		const baselineBranch = urlParams.get('baseline_branch');
-		if (currentBranch) params.set("var-branch", currentBranch);
-		if (baselineBranch) params.set("var-baseline_branch", baselineBranch);
-		
-		// Construct the URL
-		link.href = `${window.grafanaURL}/d/benchmark-comparison/cockroach-benchmark-comparison?${params.toString()}`;
-		link.textContent = "Compare";
-		link.title = "Compare this benchmark in Grafana with detailed metrics";
-		link.target = "_blank";  // Open in new tab
-		
-		grafanaCell.appendChild(link);
-		return grafanaCell;
-	}
-
 	// Create the header.
 	const header = document.createElement("tr");
 	header.appendChild(createCell("Date", true));
 	header.appendChild(createCell("Current Commit", true));
 	header.appendChild(createCell("Baseline Commit", true));
 	header.appendChild(createCell("Delta", true));
-	header.appendChild(createCell("Grafana Comparison", true));
 	table.appendChild(header);
 
 	// Find the min and max.
@@ -770,18 +760,20 @@ function addTable(bench, unit, repository, commits) {
 			}
 			range.classList.add("Dashboard-table-range");
 			row.appendChild(range);
-
-			// Grafana link cell
-			const grafanaCell = createGrafanaLink(bench.Name, c.Date);
-			row.appendChild(grafanaCell);
 		} else {
 			console.log("No value found for commit:", c.Hash);
-			
-			// Empty delta cell
+			// Current commit cell
+			const currentCommitCell = createCell("N/A", false);
+			row.appendChild(currentCommitCell);
+
+			// Baseline commit cell
+			const baselineCommitCell = createCell("N/A", false);
+			row.appendChild(baselineCommitCell);
+
+			// Delta cell
 			const range = createCell("", false);
 			try {
 				console.log("Creating NoDataRange with min, max:", min, max);
-				
 				// Validate min and max before creating range
 				if (typeof min === 'number' && typeof max === 'number' && !isNaN(min) && !isNaN(max)) {
 					const noDataElement = NoDataRange(min, max, 600, 48);
@@ -803,18 +795,6 @@ function addTable(bench, unit, repository, commits) {
 			}
 			range.classList.add("Dashboard-table-range");
 			row.appendChild(range);
-
-			// Empty current commit cell
-			const currentCommitCell = createCell("N/A", false);
-			row.appendChild(currentCommitCell);
-
-			// Empty baseline commit cell
-			const baselineCommitCell = createCell("N/A", false);
-			row.appendChild(baselineCommitCell);
-
-			// Grafana link cell
-			const grafanaCell = createGrafanaLink(bench.Name, c.Date);
-			row.appendChild(grafanaCell);
 		}
 
 		// Add row to table
@@ -880,9 +860,6 @@ let now = new Date();
 // Fill search boxes from query params.
 function prefillSearch(formFields) {
 	let params = new URLSearchParams(window.location.search);
-
-	// Store Grafana URL globally for use in table creation
-	window.grafanaURL = formFields.GrafanaURL || '';
 
 	let benchmark = params.get('benchmark');
 	if (benchmark) {
@@ -984,6 +961,7 @@ function prefillSearch(formFields) {
 		baselineDateInput.value = `${year}-${month}-${day}`;
 	}
 }
+
 fetch('./formfields.json')
 	.then(response => {
 		if (!response.ok) {
@@ -992,6 +970,10 @@ fetch('./formfields.json')
 		return response.json();
 	})
 	.then(function(formFields) {
+		// Store the Grafana URL
+		grafanaBaseUrl = formFields.GrafanaURL;
+
+		
 		let select = document.getElementById('branch-select');
 		for (const i in formFields.Branches) {
 			var opt = document.createElement('option');
