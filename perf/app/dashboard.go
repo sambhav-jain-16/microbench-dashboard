@@ -370,6 +370,12 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	metric := r.FormValue("unit")
 	metric = strings.Split(metric, " ")[0]
 
+	if benchmark == "" {
+		log.Printf("No benchmarks found for test: %s", benchmark)
+		http.Error(w, "No benchmarks found", 404)
+		return
+	}
+
 	// First, try to get the list of available metrics
 	metricsURL := fmt.Sprintf("%s/api/v1/series", a.VictoriaMetricsURL)
 	metricsReq, err := http.NewRequestWithContext(ctx, "GET", metricsURL, nil)
@@ -379,275 +385,276 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add query parameters to find any metrics
-	if benchmark != "" {
-		// If we have a benchmark name, query for that specific test
-		q := metricsReq.URL.Query()
-		q.Add("match[]", fmt.Sprintf(`{test="%s", unit!=""}`, benchmark))
-		q.Add("start", fmt.Sprintf("%d", start.Unix()))
-		q.Add("end", fmt.Sprintf("%d", end.Unix()))
-		metricsReq.URL.RawQuery = q.Encode()
+	// If we have a benchmark name, query for that specific test
+	q := metricsReq.URL.Query()
+	q.Add("match[]", fmt.Sprintf(`{test="%s", unit!=""}`, benchmark))
+	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	q.Add("end", fmt.Sprintf("%d", end.Unix()))
+	metricsReq.URL.RawQuery = q.Encode()
 
-		// Make the request to find available metrics
-		client := &http.Client{}
-		metricsResp, err := client.Do(metricsReq)
-		if err != nil {
-			log.Printf("Error querying VictoriaMetrics for metrics: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-		defer metricsResp.Body.Close()
+	// Make the request to find available metrics
+	client := &http.Client{}
+	metricsResp, err := client.Do(metricsReq)
+	if err != nil {
+		log.Printf("Error querying VictoriaMetrics for metrics: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer metricsResp.Body.Close()
 
-		metricsBody, err := io.ReadAll(metricsResp.Body)
-		if err != nil {
-			log.Printf("Error reading response: %v", err)
-			http.Error(w, "Error reading response", http.StatusInternalServerError)
-			return
-		}
+	metricsBody, err := io.ReadAll(metricsResp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		http.Error(w, "Error reading response", http.StatusInternalServerError)
+		return
+	}
 
-		var seriesResponse struct {
-			Status string              `json:"status"`
-			Data   []map[string]string `json:"data"`
-		}
-		if err := json.Unmarshal(metricsBody, &seriesResponse); err == nil &&
-			seriesResponse.Status == "success" && len(seriesResponse.Data) > 0 {
+	var seriesResponse struct {
+		Status string              `json:"status"`
+		Data   []map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(metricsBody, &seriesResponse); err != nil {
+		log.Printf("Error parsing response: %v", err)
+		http.Error(w, "Error parsing response", http.StatusInternalServerError)
+		return
+	}
 
-			// Extract unique metric names
-			metricNames := make([]string, 0)
-			for _, series := range seriesResponse.Data {
-				if metricName, ok := series["__name__"]; ok {
-					found := false
-					for _, existing := range metricNames {
-						if existing == metricName {
-							found = true
-							break
-						}
-					}
-					if !found {
-						metricNames = append(metricNames, metricName)
-					}
+	if seriesResponse.Status != "success" || len(seriesResponse.Data) == 0 {
+		log.Printf("No benchmarks found for test: %s", benchmark)
+		http.Error(w, "No benchmarks found", 404)
+		return
+	}
+
+	// Extract unique metric names
+	metricNames := make([]string, 0)
+	for _, series := range seriesResponse.Data {
+		if metricName, ok := series["__name__"]; ok {
+			found := false
+			for _, existing := range metricNames {
+				if existing == metricName {
+					found = true
+					break
 				}
 			}
-
-			if len(metricNames) > 0 {
-				log.Printf("Found metrics for test %s: %v", benchmark, metricNames)
-
-				// Process each metric individually
-				var allBenchmarks []*BenchmarkJSON
-				var allCommits []Commit
-				commitsMap := make(map[string]Commit) // To track unique commits
-
-				for _, metricName := range metricNames {
-					var metricQuery string
-					if metric != "" {
-						// Specific benchmark and unit query
-						log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s",
-							metricName, benchmark, cloud, branch)
-						metricQuery = fmt.Sprintf(`avg_over_time(%s{test="%s",cloud="%s",branch="%s",unit!=""}[1d])`,
-							metric, benchmark, cloud, branch)
-					} else {
-						// Query for all units of this test
-						var benchmarkFilter string
-						if benchmark != "" {
-							benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
-						} else {
-							benchmarkFilter = ""
-						}
-
-						log.Printf("Querying for metric=%s, cloud=%s, branch=%s, test filter=%s",
-							metricName, cloud, branch, benchmarkFilter)
-						metricQuery = fmt.Sprintf(`avg_over_time(%s{cloud="%s",branch="%s"%s,unit!=""}[1d])`,
-							metricName, cloud, branch, benchmarkFilter)
-					}
-
-					// Get data for this metric
-					metricData, err := vmClient.Query(ctx, metricQuery, start, end)
-					if err != nil {
-						log.Printf("Error querying metric %s: %v", metricName, err)
-						continue
-					}
-
-					// Get baseline data for this metric if needed
-					var metricBaselineData []byte
-
-					// Use baseline configuration for the query
-					baselineQuery := strings.Replace(metricQuery,
-						fmt.Sprintf(`cloud="%s"`, cloud),
-						fmt.Sprintf(`cloud="%s"`, baselineCloud), 1)
-					baselineQuery = strings.Replace(baselineQuery,
-						fmt.Sprintf(`branch="%s"`, branch),
-						fmt.Sprintf(`branch="%s"`, baselineBranch), 1)
-
-					metricBaselineData, err = vmClient.Query(ctx, baselineQuery, baselineStart, baselineEnd)
-					if err != nil {
-						log.Printf("Error querying baseline for metric %s: %v", metricName, err)
-						// Continue without baseline data
-					} else if len(metricBaselineData) == 0 {
-						// Check if the baseline data is empty
-						log.Printf("No baseline metrics found for metric %s on baseline date %s", metricName, baselineDate)
-						http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
-						return
-					}
-
-					// Parse the response for this metric
-					metricBenchmarks, err := parseVictoriaMetricsResponse(metricData, true, metricBaselineData)
-					if err != nil {
-						if err.Error() == "no baseline metrics found" {
-							log.Printf("No baseline metrics found for baseline date: %s", baselineDate)
-							http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
-							return
-						}
-						log.Printf("Error parsing response for metric %s: %v", metricName, err)
-						continue
-					}
-
-					if len(metricBenchmarks) > 0 {
-						log.Printf("Found %d benchmarks for metric %s", len(metricBenchmarks), metricName)
-
-						// Add benchmarks to the combined results
-						allBenchmarks = append(allBenchmarks, metricBenchmarks...)
-
-						// Add commits to the combined results
-						metricCommits := commitsFromBenchmarks(metricBenchmarks)
-						for _, commit := range metricCommits {
-							commitsMap[commit.Hash] = commit
-						}
-					} else {
-						log.Printf("No benchmarks found for metric %s", metricName)
-					}
-					if metric != "" {
-						break
-					}
-				}
-
-				// Convert commits map to slice
-				for _, commit := range commitsMap {
-					allCommits = append(allCommits, commit)
-				}
-
-				// Sort commits by date
-				sort.Slice(allCommits, func(i, j int) bool {
-					return allCommits[i].Date.Before(allCommits[j].Date)
-				})
-
-				if len(allBenchmarks) > 0 {
-					// Write the combined response
-					w.Header().Set("Content-Type", "application/json")
-
-					if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-						w.Header().Set("Content-Encoding", "gzip")
-						gz := gzip.NewWriter(w)
-						defer gz.Close()
-						w = &gzipResponseWriter{w: gz, ResponseWriter: w}
-					}
-
-					if err := json.NewEncoder(w).Encode(&DataJSON{Benchmarks: allBenchmarks, Commits: allCommits}); err != nil {
-						log.Printf("Error encoding results: %v", err)
-						http.Error(w, "Internal error, see logs", 500)
-					}
-					return
-				}
-
-				// If we get here, it means we either didn't find any metrics or none of the metrics had data
-				log.Printf("No benchmarks found for test: %s", benchmark)
-				http.Error(w, "No benchmarks found", 404)
-				return
+			if !found {
+				metricNames = append(metricNames, metricName)
 			}
 		}
 	}
 
-	// If we get here, it means we either didn't find any metrics or none of the metrics had data
-	log.Printf("No benchmarks found for test: %s", benchmark)
-	http.Error(w, "No benchmarks found", 404)
+	if len(metricNames) == 0 {
+		log.Printf("No benchmarks found for test: %s", benchmark)
+		http.Error(w, "No benchmarks found", 404)
+		return
+	}
+
+	log.Printf("Found metrics for test %s: %v", benchmark, metricNames)
+
+	// Process each metric individually
+	var allBenchmarks []*BenchmarkJSON
+	var allCommits []Commit
+	commitsMap := make(map[string]Commit) // To track unique commits
+
+	for _, metricName := range metricNames {
+		var metricQuery string
+		if metric != "" {
+			// Specific benchmark and unit query
+			log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s",
+				metricName, benchmark, cloud, branch)
+			metricQuery = fmt.Sprintf(`avg_over_time(%s{test="%s",cloud="%s",branch="%s",unit!=""}[1d])`,
+				metric, benchmark, cloud, branch)
+		} else {
+			// Query for all units of this test
+			var benchmarkFilter string
+			if benchmark != "" {
+				benchmarkFilter = fmt.Sprintf(`,test=~"%s"`, benchmark)
+			}
+
+			log.Printf("Querying for metric=%s, cloud=%s, branch=%s, test filter=%s",
+				metricName, cloud, branch, benchmarkFilter)
+			metricQuery = fmt.Sprintf(`avg_over_time(%s{cloud="%s",branch="%s"%s,unit!=""}[1d])`,
+				metricName, cloud, branch, benchmarkFilter)
+		}
+
+		// Get data for this metric
+		metricData, err := vmClient.Query(ctx, metricQuery, start, end)
+		if err != nil {
+			log.Printf("Error querying metric %s: %v", metricName, err)
+			continue
+		}
+
+		// Use baseline configuration for the query
+		baselineQuery := strings.Replace(metricQuery,
+			fmt.Sprintf(`cloud="%s"`, cloud),
+			fmt.Sprintf(`cloud="%s"`, baselineCloud), 1)
+		baselineQuery = strings.Replace(baselineQuery,
+			fmt.Sprintf(`branch="%s"`, branch),
+			fmt.Sprintf(`branch="%s"`, baselineBranch), 1)
+
+		metricBaselineData, err := vmClient.Query(ctx, baselineQuery, baselineStart, baselineEnd)
+		if err != nil {
+			log.Printf("Error querying baseline for metric %s: %v", metricName, err)
+			continue
+		}
+
+		if len(metricBaselineData) == 0 {
+			log.Printf("No baseline metrics found for metric %s on baseline date %s", metricName, baselineDate)
+			http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
+			return
+		}
+
+		// Parse the response for this metric
+		metricBenchmarks, err := parseVictoriaMetricsResponse(metricData, true, metricBaselineData)
+		if err != nil {
+			if err.Error() == "no baseline metrics found" {
+				log.Printf("No baseline metrics found for baseline date: %s", baselineDate)
+				http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
+				return
+			}
+			log.Printf("Error parsing response for metric %s: %v", metricName, err)
+			continue
+		}
+
+		if len(metricBenchmarks) == 0 {
+			log.Printf("No benchmarks found for metric %s", metricName)
+			continue
+		}
+
+		log.Printf("Found %d benchmarks for metric %s", len(metricBenchmarks), metricName)
+
+		// Add benchmarks to the combined results
+		allBenchmarks = append(allBenchmarks, metricBenchmarks...)
+
+		// Add commits to the combined results
+		metricCommits := commitsFromBenchmarks(metricBenchmarks)
+		for _, commit := range metricCommits {
+			commitsMap[commit.Hash] = commit
+		}
+
+		if metric != "" {
+			break
+		}
+	}
+
+	if len(allBenchmarks) == 0 {
+		log.Printf("No benchmarks found for test: %s", benchmark)
+		http.Error(w, "No benchmarks found", 404)
+		return
+	}
+
+	// Convert commits map to slice
+	for _, commit := range commitsMap {
+		allCommits = append(allCommits, commit)
+	}
+
+	// Sort commits by date
+	sort.Slice(allCommits, func(i, j int) bool {
+		return allCommits[i].Date.Before(allCommits[j].Date)
+	})
+
+	// Write the combined response
+	w.Header().Set("Content-Type", "application/json")
+
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		w = &gzipResponseWriter{w: gz, ResponseWriter: w}
+	}
+
+	if err := json.NewEncoder(w).Encode(&DataJSON{Benchmarks: allBenchmarks, Commits: allCommits}); err != nil {
+		log.Printf("Error encoding results: %v", err)
+		http.Error(w, "Internal error, see logs", 500)
+		return
+	}
 }
 
 // parseVictoriaMetricsResponse parses the VictoriaMetrics response into BenchmarkJSON format
 func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []byte) ([]*BenchmarkJSON, error) {
 	// First try to use the benchfmt-based comparison if both current and baseline data are available
-	if hasBaseline && baselineData != nil {
-		// Try the new comparison method using benchfmt
-		log.Printf("Attempting to parse data with benchfmt comparison method")
-		currentMetrics, err := convertVMDataToMetricPoints(data)
-		if err == nil && len(currentMetrics) > 0 {
-			baselineMetrics, err := convertVMDataToMetricPoints(baselineData)
-			if err != nil {
-				log.Printf("Error converting baseline data to metric points: %v", err)
-				return nil, fmt.Errorf("error converting baseline data: %w", err)
-			} else if len(baselineMetrics) == 0 {
-				// Check if the baseline data is empty
-				log.Printf("No baseline metrics found in VictoriaMetrics response")
-				return nil, fmt.Errorf("no baseline metrics found")
-			}
+	if !hasBaseline || baselineData == nil {
+		return parseVictoriaMetricsResponseWithoutBaseline(data)
+	}
 
-			// Log metrics counts for debugging
-			log.Printf("Found %d current metrics and %d baseline metrics for benchfmt comparison",
-				len(currentMetrics), len(baselineMetrics))
+	// Try the new comparison method using benchfmt
+	log.Printf("Attempting to parse data with benchfmt comparison method")
+	currentMetrics, err := convertVMDataToMetricPoints(data)
+	if err != nil {
+		log.Printf("Error converting current data to metric points: %v", err)
+		return parseVictoriaMetricsResponseWithoutBaseline(data)
+	}
 
-			// Log all current metric keys and their point counts
-			log.Printf("Current metrics:")
-			for key, points := range currentMetrics {
-				log.Printf("  - %s: %d points", key, len(points))
-				if len(points) > 0 {
-					startTime := points[0].Timestamp.Format(time.RFC3339)
-					endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
-					log.Printf("    Time range: %s to %s", startTime, endTime)
-				}
-			}
+	if len(currentMetrics) == 0 {
+		log.Printf("No current metrics found in VictoriaMetrics response")
+		return parseVictoriaMetricsResponseWithoutBaseline(data)
+	}
 
-			// Log all baseline metric keys and their point counts
-			log.Printf("Baseline metrics:")
-			for key, points := range baselineMetrics {
-				log.Printf("  - %s: %d points", key, len(points))
-				if len(points) > 0 {
-					startTime := points[0].Timestamp.Format(time.RFC3339)
-					endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
-					log.Printf("    Time range: %s to %s", startTime, endTime)
-				}
-			}
+	baselineMetrics, err := convertVMDataToMetricPoints(baselineData)
+	if err != nil {
+		log.Printf("Error converting baseline data to metric points: %v", err)
+		return nil, fmt.Errorf("error converting baseline data: %w", err)
+	}
 
-			// Try to create comparisons using the benchfmt approach
-			compBenchmarks, err := createBenchmarkComparisons(currentMetrics, baselineMetrics)
-			if err == nil && len(compBenchmarks) > 0 {
-				log.Printf("Successfully created %d benchmark comparisons using benchfmt", len(compBenchmarks))
+	if len(baselineMetrics) == 0 {
+		log.Printf("No baseline metrics found in VictoriaMetrics response")
+		return nil, fmt.Errorf("no baseline metrics found")
+	}
 
-				// Log the comparisons created
-				for i, b := range compBenchmarks {
-					log.Printf("Comparison %d: %s (%s) with %d values",
-						i, b.Name, b.Unit, len(b.Values))
-				}
+	// Log metrics counts for debugging
+	log.Printf("Found %d current metrics and %d baseline metrics for benchfmt comparison",
+		len(currentMetrics), len(baselineMetrics))
 
-				// Calculate regressions for each benchmark
-				for _, benchmark := range compBenchmarks {
-					benchmark.Regression = worstRegression(benchmark)
-				}
-
-				return compBenchmarks, nil
-			} else if err != nil {
-				log.Printf("Error creating benchmark comparisons: %v", err)
-			} else {
-				log.Printf("No comparisons created with benchfmt method - no matching metrics between current and baseline")
-			}
-		} else {
-			if err != nil {
-				log.Printf("Error converting current data to metric points: %v", err)
-			} else {
-				log.Printf("No current metrics found in VictoriaMetrics response")
-
-				// Check for current data but empty results
-				if data != nil {
-					var dataPreview string
-					if len(data) > 500 {
-						dataPreview = string(data[:500]) + "... [truncated]"
-					} else {
-						dataPreview = string(data)
-					}
-					log.Printf("Current data exists but no metrics extracted. Current data preview: %s", dataPreview)
-				}
-			}
+	// Log all current metric keys and their point counts
+	log.Printf("Current metrics:")
+	for key, points := range currentMetrics {
+		log.Printf("  - %s: %d points", key, len(points))
+		if len(points) > 0 {
+			startTime := points[0].Timestamp.Format(time.RFC3339)
+			endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
+			log.Printf("    Time range: %s to %s", startTime, endTime)
 		}
 	}
 
-	// Fall back to the original implementation
+	// Log all baseline metric keys and their point counts
+	log.Printf("Baseline metrics:")
+	for key, points := range baselineMetrics {
+		log.Printf("  - %s: %d points", key, len(points))
+		if len(points) > 0 {
+			startTime := points[0].Timestamp.Format(time.RFC3339)
+			endTime := points[len(points)-1].Timestamp.Format(time.RFC3339)
+			log.Printf("    Time range: %s to %s", startTime, endTime)
+		}
+	}
+
+	// Try to create comparisons using the benchfmt approach
+	compBenchmarks, err := createBenchmarkComparisons(currentMetrics, baselineMetrics)
+	if err != nil {
+		log.Printf("Error creating benchmark comparisons: %v", err)
+		return parseVictoriaMetricsResponseWithoutBaseline(data)
+	}
+
+	if len(compBenchmarks) == 0 {
+		log.Printf("No comparisons created with benchfmt method - no matching metrics between current and baseline")
+		return parseVictoriaMetricsResponseWithoutBaseline(data)
+	}
+
+	log.Printf("Successfully created %d benchmark comparisons using benchfmt", len(compBenchmarks))
+
+	// Log the comparisons created
+	for i, b := range compBenchmarks {
+		log.Printf("Comparison %d: %s (%s) with %d values",
+			i, b.Name, b.Unit, len(b.Values))
+	}
+
+	// Calculate regressions for each benchmark
+	for _, benchmark := range compBenchmarks {
+		benchmark.Regression = worstRegression(benchmark)
+	}
+
+	return compBenchmarks, nil
+}
+
+func parseVictoriaMetricsResponseWithoutBaseline(data []byte) ([]*BenchmarkJSON, error) {
 	var response struct {
 		Status string `json:"status"`
 		Data   struct {
@@ -684,68 +691,6 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 	log.Printf("Response status: %s, result type: %s, result count: %d",
 		response.Status, response.Data.ResultType, len(response.Data.Result))
 
-	// First check if we have baseline data we can use for commit hashes
-	baselineCommitsByDate := make(map[string]string)
-
-	if hasBaseline && baselineData != nil {
-		// Parse baseline response to extract baseline commits
-		var baselineResponse struct {
-			Status string `json:"status"`
-			Data   struct {
-				ResultType string `json:"resultType"`
-				Result     []struct {
-					Metric struct {
-						Name           string `json:"__name__"`
-						Test           string `json:"test"`
-						Unit           string `json:"unit"`
-						Branch         string `json:"branch"`
-						Cloud          string `json:"cloud"`
-						TeamCityRunID  string `json:"test_run_id"`
-						Commit         string `json:"commit"`
-						IsHigherBetter string `json:"is_higher_better"`
-					} `json:"metric"`
-					Values [][]interface{} `json:"values"`
-				} `json:"result"`
-			} `json:"data"`
-		}
-
-		if err := json.Unmarshal(baselineData, &baselineResponse); err == nil &&
-			baselineResponse.Status == "success" {
-
-			// Collect all baseline commits indexed by date
-			for _, result := range baselineResponse.Data.Result {
-				for _, v := range result.Values {
-					if len(v) != 2 {
-						continue
-					}
-
-					ts, ok := v[0].(float64)
-					if !ok {
-						continue
-					}
-
-					// Get commit hash from baseline
-					baselineCommit := ""
-					if result.Metric.Commit != "" {
-						baselineCommit = result.Metric.Commit
-					} else if result.Metric.TeamCityRunID != "" {
-						baselineCommit = extractTeamCityRunID(result.Metric.TeamCityRunID)
-					} else {
-						baselineCommit = "baseline-" + time.Unix(int64(ts), 0).Format("20060102")
-					}
-
-					// Store using date as key
-					dateKey := time.Unix(int64(ts), 0).Format("2006-01-02")
-					baselineCommitsByDate[dateKey] = baselineCommit
-				}
-			}
-
-			log.Printf("Collected %d baseline commits by date for regular data flow", len(baselineCommitsByDate))
-		} else if err != nil {
-			log.Printf("Error parsing baseline data for commit lookup: %v", err)
-		}
-	}
-
 	if len(response.Data.Result) == 0 {
 		log.Printf("No metrics found in VictoriaMetrics response")
 
@@ -766,162 +711,6 @@ func parseVictoriaMetricsResponse(data []byte, hasBaseline bool, baselineData []
 			}
 		}
 
-		if hasBaseline {
-			log.Printf("Attempting to use baseline data anyway")
-
-			// Try with baseline data
-			var baselineResponse struct {
-				Status string `json:"status"`
-				Data   struct {
-					ResultType string `json:"resultType"`
-					Result     []struct {
-						Metric struct {
-							Name           string `json:"__name__"`
-							Test           string `json:"test"`
-							Unit           string `json:"unit"`
-							Branch         string `json:"branch"`
-							Cloud          string `json:"cloud"`
-							TeamCityRunID  string `json:"test_run_id"`
-							Commit         string `json:"commit"`
-							IsHigherBetter string `json:"is_higher_better"`
-						} `json:"metric"`
-						Values [][]interface{} `json:"values"`
-					} `json:"result"`
-				} `json:"data"`
-			}
-
-			if err := json.Unmarshal(baselineData, &baselineResponse); err == nil &&
-				baselineResponse.Status == "success" && len(baselineResponse.Data.Result) > 0 {
-
-				log.Printf("Found %d metrics in baseline data, using those",
-					len(baselineResponse.Data.Result))
-
-				// Create benchmarks from baseline data
-				benchmarks := make([]*BenchmarkJSON, 0)
-
-				// Create a map of baseline commits by date for later lookup
-				baselineCommitsByDate := make(map[string]string)
-
-				// First pass: collect all baseline commits
-				for _, result := range baselineResponse.Data.Result {
-					for _, v := range result.Values {
-						if len(v) != 2 {
-							continue
-						}
-
-						ts, ok := v[0].(float64)
-						if !ok {
-							continue
-						}
-
-						// Get commit hash from baseline
-						baselineCommit := ""
-						if result.Metric.Commit != "" {
-							baselineCommit = result.Metric.Commit
-						} else if result.Metric.TeamCityRunID != "" {
-							baselineCommit = extractTeamCityRunID(result.Metric.TeamCityRunID)
-						} else {
-							baselineCommit = "baseline-" + time.Unix(int64(ts), 0).Format("20060102")
-						}
-
-						// Store using date as key
-						dateKey := time.Unix(int64(ts), 0).Format("2006-01-02")
-						baselineCommitsByDate[dateKey] = baselineCommit
-					}
-				}
-
-				log.Printf("Collected baseline commits for %d dates", len(baselineCommitsByDate))
-
-				// Second pass: create benchmarks with actual baseline commit hashes
-				for _, result := range baselineResponse.Data.Result {
-					if result.Metric.Test == "" || result.Metric.Unit == "" {
-						continue
-					}
-
-					benchmark := &BenchmarkJSON{
-						Name:           result.Metric.Test,
-						Unit:           result.Metric.Unit,
-						Metric:         result.Metric.Name,
-						HigherIsBetter: getHigherBetter(result.Metric.IsHigherBetter),
-						Values:         []ValueJSON{},
-					}
-
-					// Add values from baseline
-					for _, v := range result.Values {
-						if len(v) != 2 {
-							continue
-						}
-
-						ts, ok := v[0].(float64)
-						if !ok {
-							continue
-						}
-
-						var valStr string
-						switch val := v[1].(type) {
-						case string:
-							valStr = val
-						case float64:
-							valStr = fmt.Sprintf("%f", val)
-						default:
-							continue
-						}
-
-						value, err := strconv.ParseFloat(valStr, 64)
-						if err != nil {
-							continue
-						}
-
-						// Use commit field if available, then fallback to TeamCityRunID, then timestamp
-						commitHash := fmt.Sprintf("%d", int64(ts)) // Fallback to timestamp
-						if result.Metric.Commit != "" {
-							commitHash = result.Metric.Commit
-						} else if result.Metric.TeamCityRunID != "" {
-							commitHash = extractTeamCityRunID(result.Metric.TeamCityRunID)
-						}
-
-						// Look up baseline commit by date
-						dateKey := time.Unix(int64(ts), 0).Format("2006-01-02")
-						baselineCommitHash := baselineCommitsByDate[dateKey]
-						if baselineCommitHash == "" {
-							// If no baseline commit found, use a placeholder
-							baselineCommitHash = "baseline-" + dateKey
-						}
-
-						benchmark.Values = append(benchmark.Values, ValueJSON{
-							CommitDate:           time.Unix(int64(ts), 0),
-							CommitHash:           commitHash,
-							BaselineCommitHash:   baselineCommitHash, // Use the actual baseline commit hash
-							BaselineCommitDate:   time.Unix(int64(ts), 0),
-							BenchmarksCommitHash: "benchmarks",
-
-							Low:    value, // Estimate confidence interval
-							Center: value,
-							High:   value, // Estimate confidence interval
-						})
-					}
-
-					if len(benchmark.Values) > 0 {
-						sort.Slice(benchmark.Values, func(i, j int) bool {
-							return benchmark.Values[i].CommitDate.Before(benchmark.Values[j].CommitDate)
-						})
-						benchmarks = append(benchmarks, benchmark)
-					}
-				}
-
-				if len(benchmarks) > 0 {
-					log.Printf("Created %d benchmarks from baseline data", len(benchmarks))
-					return benchmarks, nil
-				}
-			} else {
-				log.Printf("No usable metrics found in baseline data either")
-				if err != nil {
-					log.Printf("Error parsing baseline data: %v", err)
-				}
-			}
-		}
-
-		// Modified the error message to be more specific about the empty result
 		return nil, fmt.Errorf("no metrics found in response (result array is empty)")
 	}
 
