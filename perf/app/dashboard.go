@@ -342,6 +342,9 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	// Parse baseline date
 	var baselineStart, baselineEnd time.Time
 	baselineDate := r.FormValue("baseline_date")
+	if baselineDate == "" {
+		baselineDate = start.Format("2006-01-02")
+	}
 
 	baselineStart, err := time.Parse("2006-01-02", baselineDate)
 	if err != nil {
@@ -878,6 +881,8 @@ func (a *App) dashboardTests(w http.ResponseWriter, r *http.Request) {
 	// Add query parameters
 	q := req.URL.Query()
 	q.Add("start", fmt.Sprintf("%d", start.Unix()))
+	// Add match parameter to filter for tests with non-empty unit labels
+	q.Add("match[]", `{unit!=""}`)
 	req.URL.RawQuery = q.Encode()
 
 	// Make the request
