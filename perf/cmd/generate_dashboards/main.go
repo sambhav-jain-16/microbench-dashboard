@@ -339,7 +339,7 @@ func createSummaryPanel(metrics []map[string]string, testName string) []map[stri
 			continue
 		}
 
-		expr := fmt.Sprintf(`avg(%s{test="%s", cloud="$cloud", branch="$branch", commit=~"$commit|"`, name, testName)
+		expr := fmt.Sprintf(`avg(%s{test="%s", cloud="$cloud", goos="$goos", goarch="$goarch", branch="$branch", commit=~"$commit|"`, name, testName)
 		if strings.Contains(testName, "tpccbench") {
 			expr += `, warehouses=~"$warehouses"`
 		}
@@ -478,7 +478,7 @@ func createGaugePanel(metric map[string]string, testName string) map[string]inte
 					},
 					"disableTextWrap": false,
 					"editorMode": "builder",
-					"expr": fmt.Sprintf(`avg by(warehouses) (%s{test="%s", cloud="$cloud", branch="$branch", commit=~"$commit|"})`, name, testName),
+					"expr": fmt.Sprintf(`avg by(warehouses) (%s{test="%s", cloud="$cloud", goos="$goos", goarch="$goarch", branch="$branch", commit=~"$commit|"})`, name, testName),
 					"fullMetaSearch": false,
 					"includeNullMetadata": true,
 					"legendFormat": "__auto",
@@ -522,7 +522,7 @@ func createGaugePanel(metric map[string]string, testName string) map[string]inte
 	}
 
 	// Regular gauge panel for other metrics
-	expr := fmt.Sprintf(`avg(%s{test="%s", cloud="$cloud", branch="$branch", commit=~"$commit|"`, name, testName)
+	expr := fmt.Sprintf(`avg(%s{test="%s", cloud="$cloud", goos="$goos", goarch="$goarch", branch="$branch", commit=~"$commit|"`, name, testName)
 	if name == "openmetric_tpce_latency" {
 		expr += `, quantile="$quantile"`
 	}
@@ -697,7 +697,9 @@ func main() {
 				"list": []map[string]interface{}{
 					{
 						"current": map[string]interface{}{
-							"selected": false,
+							"selected": true,
+							"text": "gce",
+							"value": "gce",
 						},
 						"datasource": map[string]string{
 							"type": "prometheus",
@@ -712,6 +714,60 @@ func main() {
 						"options": []interface{}{},
 						"query": map[string]interface{}{
 							"query": fmt.Sprintf(`label_values(%s{test="%s"}, cloud)`, metrics[0]["__name__"], testName),
+							"refId": "StandardVariableQuery",
+						},
+						"refresh": 2,
+						"regex": "",
+						"skipUrlSync": false,
+						"sort": 1,
+						"type": "query",
+					},
+					{
+						"current": map[string]interface{}{
+							"selected": true,
+							"text": "linux",
+							"value": "linux",
+						},
+						"datasource": map[string]string{
+							"type": "prometheus",
+							"uid":  *grafanaDatasourceUID,
+						},
+						"definition": fmt.Sprintf(`label_values(%s{test="%s"}, goos)`, metrics[0]["__name__"], testName),
+						"hide": 0,
+						"includeAll": true,
+						"label": "Operating System",
+						"multi": false,
+						"name": "goos",
+						"options": []interface{}{},
+						"query": map[string]interface{}{
+							"query": fmt.Sprintf(`label_values(%s{test="%s"}, goos)`, metrics[0]["__name__"], testName),
+							"refId": "StandardVariableQuery",
+						},
+						"refresh": 2,
+						"regex": "",
+						"skipUrlSync": false,
+						"sort": 1,
+						"type": "query",
+					},
+					{
+						"current": map[string]interface{}{
+							"selected": true,
+							"text": "amd64",
+							"value": "amd64",
+						},
+						"datasource": map[string]string{
+							"type": "prometheus",
+							"uid":  *grafanaDatasourceUID,
+						},
+						"definition": fmt.Sprintf(`label_values(%s{test="%s"}, goarch)`, metrics[0]["__name__"], testName),
+						"hide": 0,
+						"includeAll": true,
+						"label": "Architecture",
+						"multi": false,
+						"name": "goarch",
+						"options": []interface{}{},
+						"query": map[string]interface{}{
+							"query": fmt.Sprintf(`label_values(%s{test="%s"}, goarch)`, metrics[0]["__name__"], testName),
 							"refId": "StandardVariableQuery",
 						},
 						"refresh": 2,
@@ -824,17 +880,14 @@ func main() {
 					"type": "prometheus",
 					"uid":  *grafanaDatasourceUID,
 				},
-				"definition": fmt.Sprintf(`label_values(%s{test="%s", cloud="$cloud", branch="$branch", commit=~"$commit|"}, warehouses)`, metrics[0]["__name__"], testName),
+				"definition": fmt.Sprintf(`label_values(%s{test="%s", cloud="$cloud", goos="$goos", goarch="$goarch", branch="$branch", commit=~"$commit|"}, warehouses)`, metrics[0]["__name__"], testName),
 				"hide": 0,
 				"includeAll": true,
 				"label": "Warehouses",
 				"multi": true,
 				"name": "warehouses",
 				"options": []interface{}{},
-				"query": map[string]interface{}{
-					"query": fmt.Sprintf(`label_values(%s{test="%s", cloud="$cloud", branch="$branch", commit=~"$commit|"}, warehouses)`, metrics[0]["__name__"], testName),
-					"refId": "StandardVariableQuery",
-				},
+				"query": fmt.Sprintf(`label_values(%s{test="%s", cloud="$cloud", goos="$goos", goarch="$goarch", branch="$branch", commit=~"$commit|"}, warehouses)`, metrics[0]["__name__"], testName),
 				"refresh": 2,
 				"regex": "",
 				"skipUrlSync": false,
