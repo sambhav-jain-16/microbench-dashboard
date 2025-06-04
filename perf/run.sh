@@ -4,7 +4,7 @@
 set -e
 
 # Default VictoriaMetrics URL if not set
-export VICTORIAMETRICS_URL=${VICTORIAMETRICS_URL:-"https://roachperf-o11y.observability.testeng.crdb.io/vmselect/select/0/prometheus"}
+export VICTORIAMETRICS_URL=${VICTORIAMETRICS_URL:-"https://roachperf-o11y.observability.testeng.crdb.io/vmselect/select/multitenant/prometheus"}
 
 # Default Grafana URL if not set
 export GRAFANA_URL=${GRAFANA_URL:-"https://grafana.testeng.crdb.io"}

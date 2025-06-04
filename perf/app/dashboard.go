@@ -66,6 +66,8 @@ func (a *App) dashboardRegisterOnMux(mux *http.ServeMux) {
 	mux.HandleFunc("/dashboard/annotations.json", annotationsHandler)
 	mux.HandleFunc("/dashboard/clouds.json", a.listClouds)
 	mux.HandleFunc("/dashboard/branches.json", a.listBranches)
+	mux.HandleFunc("/dashboard/gooses.json", a.listGooses)
+	mux.HandleFunc("/dashboard/goarches.json", a.listGoarches)
 }
 
 // DataJSON is the result of accessing the data.json endpoint.
@@ -321,25 +323,13 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	start := end.Add(-24 * time.Hour * time.Duration(days))
 
 	// Get cloud and branch parameters first
-	cloud := r.FormValue("cloud")
-	if cloud == "" {
-		cloud = "gce"
-	}
-	branch := r.FormValue("branch")
-	if branch == "" {
-		branch = "master"
-	}
+	filters := extractDashboardFilters(r)
 
 	// Get baseline configuration
-	baselineCloud := r.FormValue("baseline_cloud")
-	if baselineCloud == "" {
-		baselineCloud = cloud // Default to same cloud as main selection
-	}
-
-	baselineBranch := r.FormValue("baseline_branch")
-	if baselineBranch == "" {
-		baselineBranch = branch // Default to same branch as main selection
-	}
+	baselineCloud := filters.BaselineCloud
+	baselineBranch := filters.BaselineBranch
+	baselineGoos := filters.BaselineGoos
+	baselineGoarch := filters.BaselineGoarch
 
 	// Parse baseline date
 	var baselineStart, baselineEnd time.Time
@@ -465,9 +455,9 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		if metric != "" {
 			// Specific benchmark and unit query
 			log.Printf("Querying for metric=%s, test=%s, cloud=%s, branch=%s",
-				metricName, benchmark, cloud, branch)
-			metricQuery = fmt.Sprintf(`avg_over_time(%s{test="%s",cloud="%s",branch="%s",unit!=""}[1d])`,
-				metric, benchmark, cloud, branch)
+				metricName, benchmark, filters.Cloud, filters.Branch)
+			metricQuery = fmt.Sprintf(`avg_over_time(%s{test="%s",cloud="%s",branch="%s",goos="%s",goarch="%s",unit!=""}[1d])`,
+				metric, benchmark, filters.Cloud, filters.Branch, filters.Goos, filters.Goarch)
 		} else {
 			// Query for all units of this test
 			var benchmarkFilter string
@@ -476,9 +466,9 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 			}
 
 			log.Printf("Querying for metric=%s, cloud=%s, branch=%s, test filter=%s",
-				metricName, cloud, branch, benchmarkFilter)
-			metricQuery = fmt.Sprintf(`avg_over_time(%s{cloud="%s",branch="%s"%s,unit!=""}[1d])`,
-				metricName, cloud, branch, benchmarkFilter)
+				metricName, filters.Cloud, filters.Branch, benchmarkFilter)
+			metricQuery = fmt.Sprintf(`avg_over_time(%s{cloud="%s",branch="%s"%s,goos="%s",goarch="%s",unit!=""}[1d])`,
+				metricName, filters.Cloud, filters.Branch, benchmarkFilter, filters.Goos, filters.Goarch)
 		}
 
 		// Get data for this metric
@@ -490,11 +480,13 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 		// Use baseline configuration for the query
 		baselineQuery := strings.Replace(metricQuery,
-			fmt.Sprintf(`cloud="%s"`, cloud),
+			fmt.Sprintf(`cloud="%s"`, filters.Cloud),
 			fmt.Sprintf(`cloud="%s"`, baselineCloud), 1)
 		baselineQuery = strings.Replace(baselineQuery,
-			fmt.Sprintf(`branch="%s"`, branch),
+			fmt.Sprintf(`branch="%s"`, filters.Branch),
 			fmt.Sprintf(`branch="%s"`, baselineBranch), 1)
+		baselineQuery = strings.Replace(baselineQuery, fmt.Sprintf(`goos="%s"`, filters.Goos), fmt.Sprintf(`goos="%s"`, baselineGoos), 1)
+		baselineQuery = strings.Replace(baselineQuery, fmt.Sprintf(`goarch="%s"`, filters.Goarch), fmt.Sprintf(`goarch="%s"`, baselineGoarch), 1)
 
 		metricBaselineData, err := vmClient.Query(ctx, baselineQuery, baselineStart, baselineEnd)
 		if err != nil {
@@ -1157,14 +1149,7 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cloud := r.FormValue("cloud")
-	if cloud == "" {
-		cloud = "gce"
-	}
-	branch := r.FormValue("branch")
-	if branch == "" {
-		branch = "master"
-	}
+	filters := extractDashboardFilters(r)
 
 	// Calculate time range
 	days := uint64(defaultDays)
@@ -1213,7 +1198,7 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 
 	// Add query parameters
 	q := metricsReq.URL.Query()
-	q.Add("match[]", fmt.Sprintf(`{test="%s",cloud="%s",branch="%s"}`, testName, cloud, branch))
+	q.Add("match[]", fmt.Sprintf(`{test="%s",cloud="%s",branch="%s",goos="%s",goarch="%s"}`, testName, filters.Cloud, filters.Branch, filters.Goos, filters.Goarch))
 	q.Add("start", fmt.Sprintf("%d", start.Unix()))
 	q.Add("end", fmt.Sprintf("%d", end.Unix()))
 	metricsReq.URL.RawQuery = q.Encode()
@@ -1272,7 +1257,7 @@ func (a *App) seriesDataToBenchmark(w http.ResponseWriter, r *http.Request) {
 	benchmarkData := make([]*BenchmarkJSON, 0)
 	for metricName := range metricNames {
 		// Query data for this specific metric
-		query := fmt.Sprintf(`%s{test="%s",cloud="%s",branch="%s"}`, metricName, testName, cloud, branch)
+		query := fmt.Sprintf(`%s{test="%s",cloud="%s",branch="%s",goos="%s",goarch="%s"}`, metricName, testName, filters.Cloud, filters.Branch, filters.Goos, filters.Goarch)
 		log.Printf("Querying for metric %s data", metricName)
 
 		// Fetch data for this metric
@@ -1810,36 +1795,44 @@ type LabelsJSON struct {
 
 // listClouds handles the clouds.json endpoint, returning a list of available clouds for a test
 func (a *App) listClouds(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	a.listLabelValues(w, r, "cloud")
+}
 
-	// Get the test name from the query parameters
+// listBranches handles the branches.json endpoint, returning a list of available branches for a test
+func (a *App) listBranches(w http.ResponseWriter, r *http.Request) {
+	a.listLabelValues(w, r, "branch")
+}
+
+// listGooses handles the gooses.json endpoint, returning a list of available goos for a test
+func (a *App) listGooses(w http.ResponseWriter, r *http.Request) {
+	a.listLabelValues(w, r, "goos")
+}
+
+// listGoarches handles the goarches.json endpoint, returning a list of available goarch for a test
+func (a *App) listGoarches(w http.ResponseWriter, r *http.Request) {
+	a.listLabelValues(w, r, "goarch")
+}
+
+// Add this helper function near the other helpers:
+func (a *App) listLabelValues(w http.ResponseWriter, r *http.Request, label string) {
+	ctx := r.Context()
 	testName := r.FormValue("test")
 	if testName == "" {
 		http.Error(w, "test parameter is required", http.StatusBadRequest)
 		return
 	}
-
-	// Calculate the start time (1 year ago)
 	start := time.Now().Add(-365 * 24 * time.Hour)
-
-	// Construct the VictoriaMetrics query URL
-	url := fmt.Sprintf("%s/api/v1/label/cloud/values", a.VictoriaMetricsURL)
-
-	// Create the request
+	url := fmt.Sprintf("%s/api/v1/label/%s/values", a.VictoriaMetricsURL, label)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		log.Printf("Error creating request: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-
-	// Add query parameters
 	q := req.URL.Query()
 	q.Add("start", fmt.Sprintf("%d", start.Unix()))
 	q.Add("match[]", fmt.Sprintf(`{test="%s"}`, testName))
 	req.URL.RawQuery = q.Encode()
-
-	// Make the request
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1848,16 +1841,12 @@ func (a *App) listClouds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-
-	// Read the response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading response: %v", err)
 		http.Error(w, "Error reading response", http.StatusInternalServerError)
 		return
 	}
-
-	// Parse the response
 	var vmResponse struct {
 		Status string   `json:"status"`
 		Data   []string `json:"data"`
@@ -1867,14 +1856,11 @@ func (a *App) listClouds(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error parsing response", http.StatusInternalServerError)
 		return
 	}
-
 	if vmResponse.Status != "success" {
 		log.Printf("Unexpected status from VictoriaMetrics: %s", vmResponse.Status)
 		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
 		return
 	}
-
-	// Return the clouds
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(LabelsJSON{Labels: vmResponse.Data}); err != nil {
 		log.Printf("Error encoding response: %v", err)
@@ -1882,76 +1868,48 @@ func (a *App) listClouds(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// listBranches handles the branches.json endpoint, returning a list of available branches for a test
-func (a *App) listBranches(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+// Add this struct and helper function near the top (after imports):
+type DashboardFilters struct {
+	Cloud, Branch, Goos, Goarch string
+	BaselineCloud, BaselineBranch, BaselineGoos, BaselineGoarch string
+}
 
-	// Get the test name from the query parameters
-	testName := r.FormValue("test")
-	if testName == "" {
-		http.Error(w, "test parameter is required", http.StatusBadRequest)
-		return
+func extractDashboardFilters(r *http.Request) DashboardFilters {
+	cloud := r.FormValue("cloud")
+	if cloud == "" {
+		cloud = "gce"
 	}
-
-	// Calculate the start time (1 year ago)
-	start := time.Now().Add(-365 * 24 * time.Hour)
-
-	// Construct the VictoriaMetrics query URL
-	url := fmt.Sprintf("%s/api/v1/label/branch/values", a.VictoriaMetricsURL)
-
-	// Create the request
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		log.Printf("Error creating request: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
+	branch := r.FormValue("branch")
+	if branch == "" {
+		branch = "master"
 	}
-
-	// Add query parameters
-	q := req.URL.Query()
-	q.Add("start", fmt.Sprintf("%d", start.Unix()))
-	q.Add("match[]", fmt.Sprintf(`{test="%s"}`, testName))
-	req.URL.RawQuery = q.Encode()
-
-	// Make the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Error querying VictoriaMetrics: %v", err)
-		http.Error(w, "Error querying VictoriaMetrics", http.StatusInternalServerError)
-		return
+	goos := r.FormValue("goos")
+	if goos == "" {
+		goos = "linux"
 	}
-	defer resp.Body.Close()
-
-	// Read the response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Error reading response: %v", err)
-		http.Error(w, "Error reading response", http.StatusInternalServerError)
-		return
+	goarch := r.FormValue("goarch")
+	if goarch == "" {
+		goarch = "amd64"
 	}
-
-	// Parse the response
-	var vmResponse struct {
-		Status string   `json:"status"`
-		Data   []string `json:"data"`
+	baselineCloud := r.FormValue("baseline_cloud")
+	if baselineCloud == "" {
+		baselineCloud = cloud
 	}
-	if err := json.Unmarshal(body, &vmResponse); err != nil {
-		log.Printf("Error parsing response: %v", err)
-		http.Error(w, "Error parsing response", http.StatusInternalServerError)
-		return
+	baselineBranch := r.FormValue("baseline_branch")
+	if baselineBranch == "" {
+		baselineBranch = branch
 	}
-
-	if vmResponse.Status != "success" {
-		log.Printf("Unexpected status from VictoriaMetrics: %s", vmResponse.Status)
-		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
-		return
+	baselineGoos := r.FormValue("baseline_goos")
+	if baselineGoos == "" {
+		baselineGoos = goos
 	}
-
-	// Return the branches
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(LabelsJSON{Labels: vmResponse.Data}); err != nil {
-		log.Printf("Error encoding response: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	baselineGoarch := r.FormValue("baseline_goarch")
+	if baselineGoarch == "" {
+		baselineGoarch = goarch
+	}
+	return DashboardFilters{
+		Cloud: cloud, Branch: branch, Goos: goos, Goarch: goarch,
+		BaselineCloud: baselineCloud, BaselineBranch: baselineBranch,
+		BaselineGoos: baselineGoos, BaselineGoarch: baselineGoarch,
 	}
 }
