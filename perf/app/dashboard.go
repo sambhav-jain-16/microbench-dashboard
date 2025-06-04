@@ -345,6 +345,7 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	baselineEnd = baselineStart.Add(24 * time.Hour)
+	baselineEnd = baselineEnd.Add(-1 * time.Second)
 	log.Printf("Using baseline date: %s", baselineDate)
 
 	log.Printf("Query time ranges: Current period: %s to %s (%d days); Baseline period: %s to %s",
