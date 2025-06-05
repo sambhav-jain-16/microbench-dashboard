@@ -444,6 +444,14 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Filter metrics based on allowlist
+	metricNames = filterMetrics(metricNames, benchmark, a.MetricsAllowlist)
+	if len(metricNames) == 0 {
+		log.Printf("No allowed metrics found for test: %s", benchmark)
+		http.Error(w, "No allowed metrics found", 404)
+		return
+	}
+
 	log.Printf("Found metrics for test %s: %v", benchmark, metricNames)
 
 	// Process each metric individually
@@ -928,30 +936,81 @@ type MetricsJSON struct {
 	Metrics []string `json:"metrics"`
 }
 
-// listMetrics handles the metrics.json endpoint, returning a list of all available metrics
+// Add new struct for metrics allowlist
+type MetricsAllowlist struct {
+	Rules map[string][]string `yaml:",inline"`
+}
+
+// loadMetricsAllowlist reads and parses the metrics_allowlist.yaml file
+func loadMetricsAllowlist() (*MetricsAllowlist, error) {
+	data, err := dashboardFS.ReadFile("dashboard/metrics_allowlist.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("error reading metrics allowlist file: %w", err)
+	}
+	var allowlist MetricsAllowlist
+	if err := yaml.Unmarshal(data, &allowlist.Rules); err != nil {
+		return nil, fmt.Errorf("error parsing metrics allowlist: %w", err)
+	}
+	return &allowlist, nil
+}
+
+// filterMetrics filters metrics based on the allowlist, supporting prefix matching for test names
+func filterMetrics(metrics []string, testName string, allowlist *MetricsAllowlist) []string {
+	if allowlist == nil {
+		return metrics
+	}
+
+	// Find the most specific (longest) prefix match in the allowlist (other than "*")
+	var (
+		matchedKey  string
+		matchedLen  int
+	)
+	for key := range allowlist.Rules {
+		if key == "*" {
+			continue
+		}
+		if strings.HasPrefix(testName, key) && len(key) > matchedLen {
+			matchedKey = key
+			matchedLen = len(key)
+		}
+	}
+
+	var allowedSuffixes []string
+	if matchedLen > 0 {
+		allowedSuffixes = allowlist.Rules[matchedKey]
+	} else {
+		allowedSuffixes = allowlist.Rules["*"]
+	}
+	if allowedSuffixes == nil {
+		return metrics
+	}
+
+	var filtered []string
+	for _, metric := range metrics {
+		for _, suffix := range allowedSuffixes {
+			if suffix == "*" || strings.HasSuffix(metric, suffix) {
+				filtered = append(filtered, metric)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+// Modify listMetrics to use the allowlist
 func (a *App) listMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	// Calculate the start time (30 days ago)
 	start := time.Now().Add(-30 * 24 * time.Hour)
-
-	// Construct the VictoriaMetrics query URL
 	url := fmt.Sprintf("%s/api/v1/label/__name__/values", a.VictoriaMetricsURL)
-
-	// Create the request
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		log.Printf("Error creating request: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-
-	// Add query parameters
 	q := req.URL.Query()
 	q.Add("start", fmt.Sprintf("%d", start.Unix()))
 	req.URL.RawQuery = q.Encode()
-
-	// Make the request
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -960,16 +1019,12 @@ func (a *App) listMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-
-	// Read the response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading response: %v", err)
 		http.Error(w, "Error reading response", http.StatusInternalServerError)
 		return
 	}
-
-	// Parse the response
 	var vmResponse struct {
 		Status string   `json:"status"`
 		Data   []string `json:"data"`
@@ -979,16 +1034,14 @@ func (a *App) listMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error parsing response", http.StatusInternalServerError)
 		return
 	}
-
 	if vmResponse.Status != "success" {
 		log.Printf("Unexpected status from VictoriaMetrics: %s", vmResponse.Status)
 		http.Error(w, "Error from VictoriaMetrics", http.StatusInternalServerError)
 		return
 	}
-
-	// Return the metrics
+	filteredMetrics := filterMetrics(vmResponse.Data, r.FormValue("test"), a.MetricsAllowlist)
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(MetricsJSON{Metrics: vmResponse.Data}); err != nil {
+	if err := json.NewEncoder(w).Encode(MetricsJSON{Metrics: filteredMetrics}); err != nil {
 		log.Printf("Error encoding response: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 	}

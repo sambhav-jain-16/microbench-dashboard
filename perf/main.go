@@ -24,11 +24,13 @@ var (
 func main() {
 	https.RegisterFlags(flag.CommandLine)
 	flag.Parse()
-
-	app := &app.App{
-		VictoriaMetricsURL: *victoriaMetricsURL,
-		GrafanaURL:         *grafanaURL,
+	
+	app, err := app.NewApp()
+	if err != nil {
+		log.Fatalf("Failed to create app: %v", err)
 	}
+	app.VictoriaMetricsURL = *victoriaMetricsURL
+	app.GrafanaURL = *grafanaURL
 	mux := http.NewServeMux()
 	mux.Handle("/", http.RedirectHandler("dashboard/", 307))
 	app.RegisterOnMux(mux)

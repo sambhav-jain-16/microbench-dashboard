@@ -23,6 +23,9 @@ type App struct {
 
 	// AuthCronEmail is the service account email for /cron/syncinflux authentication.
 	AuthCronEmail string
+
+	// MetricsAllowlist holds the parsed metrics allowlist in memory
+	MetricsAllowlist *MetricsAllowlist
 }
 
 // NewApp creates a new App instance.
@@ -38,6 +41,13 @@ func NewApp() (*App, error) {
 
 	// Initialize the VictoriaMetrics client
 	app.vmClient = NewVictoriaMetricsClient(app.VictoriaMetricsURL)
+
+	// Load metrics allowlist at startup
+	allowlist, err := loadMetricsAllowlist()
+	if err != nil {
+		return nil, err
+	}
+	app.MetricsAllowlist = allowlist
 
 	return app, nil
 }
