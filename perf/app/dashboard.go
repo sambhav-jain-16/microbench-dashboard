@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -222,10 +223,6 @@ func worstRegression(b *BenchmarkJSON) *RegressionJSON {
 		v1, v0 := values[i-1], values[i]
 		score := sign * changeScore(v1.Low, v1.Center, v1.High, v0.Low, v0.Center, v0.High)
 
-		// Log each potential regression for debugging
-		log.Printf("Checking regression at index %d: score=%.3f, threshold=%.3f, v1.Center=%.3f, v0.Center=%.3f",
-			i, score, magicScoreThreshold, v1.Center, v0.Center)
-
 		if score > magicScoreThreshold && sign*v1.Center < min && score > worst.deltaScore {
 			worst.DeltaIndex = i
 			worst.deltaScore = score
@@ -280,6 +277,36 @@ const (
 	maxDays     = 366
 )
 
+// DashboardError represents an error from dashboard operations
+type DashboardError struct {
+	Code    int    // HTTP status code
+	Message string // Error message
+	Err     error  // Original error if any
+}
+
+func (e *DashboardError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("Dashboard error (code=%d): %s: %v", e.Code, e.Message, e.Err)
+	}
+	return fmt.Sprintf("Dashboard error (code=%d): %s", e.Code, e.Message)
+}
+
+func (e *DashboardError) Unwrap() error {
+	return e.Err
+}
+
+// handleDashboardError handles errors in a consistent way
+func handleDashboardError(w http.ResponseWriter, err error, status int, message string) {
+	var dashboardErr *DashboardError
+	if errors.As(err, &dashboardErr) {
+		// Use the error's status code and message if available
+		status = dashboardErr.Code
+		message = dashboardErr.Message
+	}
+	log.Printf("Dashboard error: %v", err)
+	http.Error(w, message, status)
+}
+
 // search handles /dashboard/data.json.
 //
 // TODO(prattmic): Consider caching Influx results in-memory for a few mintures
@@ -293,13 +320,13 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		var err error
 		days, err = strconv.ParseUint(dayParam, 10, 32)
 		if err != nil {
-			log.Printf("Error parsing days %q: %v", dayParam, err)
-			http.Error(w, fmt.Sprintf("day parameter must be a positive integer less than or equal to %d", maxDays), http.StatusBadRequest)
+			handleDashboardError(w, err, http.StatusBadRequest, 
+				fmt.Sprintf("day parameter must be a positive integer less than or equal to %d", maxDays))
 			return
 		}
 		if days == 0 || days > maxDays {
-			log.Printf("days %d too large", days)
-			http.Error(w, fmt.Sprintf("day parameter must be a positive integer less than or equal to %d", maxDays), http.StatusBadRequest)
+			handleDashboardError(w, nil, http.StatusBadRequest, 
+				fmt.Sprintf("day parameter must be a positive integer less than or equal to %d", maxDays))
 			return
 		}
 	}
@@ -447,8 +474,8 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	// Filter metrics based on allowlist
 	metricNames = filterMetrics(metricNames, benchmark, a.MetricsAllowlist)
 	if len(metricNames) == 0 {
-		log.Printf("No allowed metrics found for test: %s", benchmark)
-		http.Error(w, "No allowed metrics found", 404)
+		handleDashboardError(w, nil, http.StatusNotFound, 
+			fmt.Sprintf("No allowed metrics found for test: %s", benchmark))
 		return
 	}
 
@@ -483,8 +510,14 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		// Get data for this metric
 		metricData, err := vmClient.Query(ctx, metricQuery, start, end)
 		if err != nil {
-			log.Printf("Error querying metric %s: %v", metricName, err)
-			continue
+			var vmErr *VictoriaMetricsError
+			if errors.As(err, &vmErr) {
+				log.Printf("VictoriaMetrics error for metric %s: %v", metricName, vmErr)
+				continue
+			}
+			handleDashboardError(w, err, http.StatusInternalServerError, 
+				fmt.Sprintf("Error querying metric %s", metricName))
+			return
 		}
 
 		// Use baseline configuration for the query
@@ -499,13 +532,19 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 
 		metricBaselineData, err := vmClient.Query(ctx, baselineQuery, baselineStart, baselineEnd)
 		if err != nil {
-			log.Printf("Error querying baseline for metric %s: %v", metricName, err)
-			continue
+			var vmErr *VictoriaMetricsError
+			if errors.As(err, &vmErr) {
+				log.Printf("VictoriaMetrics error for baseline of metric %s: %v", metricName, vmErr)
+				continue
+			}
+			handleDashboardError(w, err, http.StatusInternalServerError, 
+				fmt.Sprintf("Error querying baseline for metric %s", metricName))
+			return
 		}
 
 		if len(metricBaselineData) == 0 {
-			log.Printf("No baseline metrics found for metric %s on baseline date %s", metricName, baselineDate)
-			http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
+			handleDashboardError(w, nil, http.StatusNotFound, 
+				fmt.Sprintf("No baseline metrics found for metric %s on baseline date %s", metricName, baselineDate))
 			return
 		}
 
@@ -513,8 +552,8 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 		metricBenchmarks, err := parseVictoriaMetricsResponse(metricData, true, metricBaselineData)
 		if err != nil {
 			if err.Error() == "no baseline metrics found" {
-				log.Printf("No baseline metrics found for baseline date: %s", baselineDate)
-				http.Error(w, fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate), http.StatusNotFound)
+				handleDashboardError(w, err, http.StatusNotFound, 
+					fmt.Sprintf("No baseline metrics found for the specified baseline date: %s", baselineDate))
 				return
 			}
 			log.Printf("Error parsing response for metric %s: %v", metricName, err)
@@ -543,8 +582,8 @@ func (a *App) dashboardData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(allBenchmarks) == 0 {
-		log.Printf("No benchmarks found for test: %s", benchmark)
-		http.Error(w, "No benchmarks found", 404)
+		handleDashboardError(w, nil, http.StatusNotFound, 
+			fmt.Sprintf("No benchmarks found for test: %s", benchmark))
 		return
 	}
 
